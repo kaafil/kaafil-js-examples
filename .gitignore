@@ -1,0 +1,11 @@
+node_modules/
+.env
+dist/
+build/
+.vite/
+
+# editor cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp

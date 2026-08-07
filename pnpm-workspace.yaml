@@ -1,0 +1,8 @@
+# pnpm does not run a dependency's build scripts unless it is allowlisted here.
+# esbuild's postinstall is what puts its platform binary in place, and both tsx
+# and vite are unusable without it — the failure shows up as a confusing
+# missing-binary error on the first run rather than at install time, so this
+# entry is load-bearing even though nothing in this repo imports esbuild
+# directly.
+allowBuilds:
+  esbuild: true
