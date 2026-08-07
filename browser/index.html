@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kaafil browser demo — manager session</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="intro">
+        <h1>Kaafil browser demo</h1>
+        <p>
+          This half proves that a browser tab can drive the on-ground manager view
+          <strong>without ever holding a partner API key</strong>. It never imports
+          <code>kaafil-js</code>, only <code>kaafil-js/client</code> — a separate module graph that
+          cannot reach the API-key code path at all. Paste the <code>accessToken</code> and
+          <code>refreshToken</code> that the <em>server</em> half's <code>auth.mintManagerToken</code>
+          call printed for you, and this page will open a session with them.
+        </p>
+      </header>
+
+      <section class="panel" aria-labelledby="session-heading">
+        <h2 id="session-heading">1. Open a session</h2>
+        <div class="field-grid">
+          <label for="baseUrl">Base URL</label>
+          <input id="baseUrl" type="text" placeholder="http://localhost:3000" autocomplete="off" />
+
+          <label for="accessToken">Access token</label>
+          <input id="accessToken" type="password" placeholder="pasted from the server half" autocomplete="off" />
+
+          <label for="refreshToken">Refresh token</label>
+          <input id="refreshToken" type="password" placeholder="pasted from the server half" autocomplete="off" />
+
+          <label for="tripRef">Trip ref</label>
+          <input id="tripRef" type="text" placeholder="trip ref to read" autocomplete="off" />
+        </div>
+        <div class="actions">
+          <button id="openBtn" type="button">Open session</button>
+          <button id="closeBtn" type="button" disabled>Close session</button>
+          <button id="loadBtn" type="button" disabled>Load journey + capabilities</button>
+          <button id="probeBtn" type="button" disabled>Read after close (prove the boundary)</button>
+        </div>
+        <p class="status" id="sessionStatus">Session: not open.</p>
+      </section>
+
+      <section class="panel" aria-labelledby="journey-heading">
+        <h2 id="journey-heading">2. Journey</h2>
+        <pre id="journeyOut" class="output">Nothing loaded yet.</pre>
+      </section>
+
+      <section class="panel" aria-labelledby="capabilities-heading">
+        <h2 id="capabilities-heading">3. Capabilities</h2>
+        <p class="hint">
+          Every capability the engine knows about is listed, whether it is lit or dark. A row's three
+          input axes — <code>modeOk</code>, <code>dataOk</code>, <code>flagOk</code> — must all be true
+          for <code>enabled</code> to be true. A dark row stays in this table; it is never filtered out.
+        </p>
+        <div class="table-wrap">
+          <table id="capabilitiesTable">
+            <thead>
+              <tr>
+                <th>capability</th>
+                <th>modeOk</th>
+                <th>dataOk</th>
+                <th>flagOk</th>
+                <th>enabled</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="log-heading">
+        <h2 id="log-heading">4. Session log</h2>
+        <p class="hint">
+          Token rotation is fully automatic — the SDK exchanges the refresh token itself, pre-emptively
+          and on a 401, with no code from this page. The only line this page contributes is
+          <code>onRefresh</code>, and its only job is persisting the rotated pair so a reload survives —
+          the SDK keeps no state across one.
+        </p>
+        <ul id="log" class="log"></ul>
+      </section>
+
+      <section class="panel error-panel" aria-labelledby="error-heading">
+        <h2 id="error-heading">5. Error panel</h2>
+        <div id="errorOut" class="error-out">No error yet.</div>
+      </section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

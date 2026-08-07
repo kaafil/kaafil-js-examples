@@ -1,0 +1,23 @@
+{
+  // moduleResolution "bundler" is the deliberate choice here: both scripts that run this repo
+  // (tsx for server/, esbuild inside Vite for browser/) resolve modules the bundler way, not the
+  // stricter NodeNext way (which would demand explicit file extensions on relative imports that
+  // neither runner actually needs). "bundler" matches what really executes the code.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "types": ["node"]
+  },
+  "include": ["server/**/*.ts", "browser/**/*.ts"]
+}

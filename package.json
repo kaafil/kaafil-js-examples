@@ -1,0 +1,30 @@
+{
+  "name": "kaafil-js-examples",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.29.3",
+  "description": "Runnable reference examples for the kaafil-js SDK: a Node server walkthrough and a browser manager-session demo.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "simulate": "tsx server/simulate.ts",
+    "dev": "vite browser",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build browser",
+    "link:local": "scripts/use-local-sdk.sh"
+  },
+  "comment:kaafil-js": "kaafil-js is not published to npm yet, so this resolves the SDK from a sibling checkout. On publish day this becomes a version range (\"^0.1.0\") and nothing else in the repo changes.",
+  "dependencies": {
+    "kaafil-js": "link:../kaafil-js"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5.9.2",
+    "tsx": "^4.19.2",
+    "vite": "^6.0.0"
+  },
+  "comment:pnpm": "The esbuild build-script allowlist lives in pnpm-workspace.yaml, which is where this pnpm reads it from."
+}

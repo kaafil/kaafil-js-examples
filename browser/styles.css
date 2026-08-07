@@ -1,0 +1,208 @@
+/* No framework, no CDN import — a CDN link would be a network dependency in
+   a repo meant to run offline. Light/dark tracks the OS setting only. */
+
+:root {
+  --bg: #f7f7f8;
+  --fg: #1a1a1e;
+  --panel-bg: #ffffff;
+  --border: #d8d8dd;
+  --muted: #5b5b66;
+  --accent: #2454ff;
+  --danger: #b3261e;
+  --danger-bg: #fdecea;
+  --ok: #1e7a34;
+  --ok-bg: #e9f7ec;
+  --dark-cap-bg: #3a1414;
+  --dark-cap-fg: #ffb4a8;
+  --code-bg: #eef0f4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14151a;
+    --fg: #e7e7ea;
+    --panel-bg: #1d1e24;
+    --border: #34353d;
+    --muted: #a2a2ad;
+    --accent: #7da2ff;
+    --danger: #ff6b60;
+    --danger-bg: #331413;
+    --ok: #57d576;
+    --ok-bg: #113018;
+    --dark-cap-bg: #4a1414;
+    --dark-cap-fg: #ffb4a8;
+    --code-bg: #26272e;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.5;
+}
+
+.page {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0 0 0.5rem;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.75rem;
+}
+
+.intro p {
+  color: var(--muted);
+}
+
+code {
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.9em;
+}
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin-top: 1.25rem;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.6rem 0.9rem;
+  align-items: center;
+}
+
+.field-grid label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+input {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+button {
+  padding: 0.5rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+.status,
+.hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.output {
+  background: var(--code-bg);
+  border-radius: 6px;
+  padding: 0.9rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  border: 1px solid var(--border);
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+}
+
+tr.capability-dark td {
+  background: var(--dark-cap-bg);
+  color: var(--dark-cap-fg);
+  font-weight: 600;
+}
+
+tr.capability-lit td.enabled-cell {
+  color: var(--ok);
+}
+
+.log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.85rem;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.log li {
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.log li:last-child {
+  border-bottom: none;
+}
+
+.error-out {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-radius: 6px;
+  padding: 0.9rem;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.error-out.is-empty {
+  background: transparent;
+  color: var(--muted);
+}
