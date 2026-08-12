@@ -17,11 +17,22 @@ manager session is scoped to one manager and expires in minutes. Splitting them 
 means the browser bundle has no code path that could reach the API-key branch even by accident — it is
 not just a convention, `kaafil-js/client` literally never imports the API-key code.
 
-- `server/simulate.ts` — the CRM-backend half. Runs the full lifecycle: ingest a trip, push a manifest,
-  assign a manager, wait for the journey to build, read capabilities and triggers, mint a manager
-  session, and demonstrate the three typed errors you actually need to branch on.
+- `server/simulate.ts` — 23 numbered steps in two halves. Steps 1-11 are the **CRM's side**, run on the
+  partner API key: ingest a trip, push a manifest, assign a manager, wait for the journey to build, read
+  capabilities and triggers, mint a manager session, and demonstrate the typed errors you actually need
+  to branch on. Steps 12-22 are **a manager's working day**, run on a manager session: an itinerary whose
+  days materialised themselves, items the server orders, a timed card going LIVE while a free morning
+  refuses to, a `?since=` delta with a tombstone in it, a rooming board filled from a preview that *is*
+  the applied plan, occupant chips drawn from the server's own glyph and tone, the day's change log, and
+  one webhook for a burst of edits rather than one each. Step 22 closes the loop from the other side: the
+  CRM reads that same day back through `kaafil.itinerary` / `kaafil.rooming`, and is refused *locally,
+  before any request* when it tries to write with the wrong credential.
 - `browser/` — the manager's-device half. A small static page that opens a session with the token pair
-  the server half printed, and loads a journey and its capabilities with it.
+  the server half printed, and loads a journey, its capabilities, and the rooming board with it.
+- `on-ground/` — a small stand-in HTTP client for the itinerary and rooming **writes**, shared by both
+  halves. **It is temporary and it says so.** `kaafil-js` does have both groups now, on the API-key client;
+  what it has no path to, from any credential, is a write. See
+  [What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do).
 
 ## Five-minute start
 
@@ -60,9 +71,16 @@ cp .env.example .env
 pnpm simulate
 ```
 
-`pnpm simulate` runs `server/simulate.ts` with `tsx`. It prints one numbered step per SDK call it makes,
+`pnpm simulate` runs `server/simulate.ts` with `tsx`. It prints one numbered step per call it makes,
 asserts the result of each step, and — if step 8 (minting a manager session) succeeds — prints an
-`accessToken`/`refreshToken` pair you can paste into the browser half.
+`accessToken`/`refreshToken` pair you can paste into the browser half. It finishes by printing the two
+trip refs the browser half can use: the step-2 trip for a journey, and the step-12 on-ground trip for a
+rooming board with people actually in it.
+
+A manager access token lives **minutes**. The whole run finishes well inside one, but if you leave the
+printed pair sitting in a terminal for half an hour before pasting it into the browser, re-run
+`pnpm simulate` rather than debugging a `401` — the browser half's own session rotates itself from then
+on, but it cannot resurrect a pair that expired before it opened.
 
 To run the browser half:
 
@@ -73,6 +91,14 @@ pnpm dev
 This starts Vite on `http://localhost:5173` (fixed by `browser/vite.config.ts`, so the URL doesn't go
 stale between runs). Open it, fill in the engine base URL and the token pair `pnpm simulate` printed,
 and click "Open session".
+
+Then pick which trip ref you paste, because the two buttons want different ones and the simulator prints
+both at the end:
+
+- **Load journey + capabilities** — the step-2 trip. It has a built journey and a capability table with a
+  dark row in it.
+- **Load rooming board** — the step-12 on-ground trip. It is the one with rooms and a filled board; the
+  step-2 trip has neither, and would render as an empty board rather than as an error.
 
 ## Prerequisites
 
@@ -120,19 +146,81 @@ throws `KaafilTimeoutError`; the step catches that and fails with a message nami
 likely cause. If you hit that 60-second timeout with no other explanation, this is it: check that the
 worker is running against the same engine before assuming the SDK or this example is broken.
 
+### The on-ground half needs three more things, and each fails in its own way
+
+Steps 12-22 drive the itinerary and rooming surfaces, which have preconditions steps 1-11 do not.
+
+| What | Why | What it looks like when it's missing |
+|---|---|---|
+| The agency's plan has **`rooming` enabled** | `rooming` is a plan-gated capability. `itinerary` is not — it is structurally ungated, because a trip cannot exist without one. | Step 18 fails with `402 PLAN_FEATURE_DISABLED`. Step 6's capability table predicts it: the `rooming` row shows `flagOk=false`. |
+| The trip is **`GROUP`**, and the walkthrough ingests its own | Rooming lights on GROUP only; mode beats every other axis. And the September trip from step 2 can never contain "now", so every clock assertion against it would pass vacuously. Step 12 therefore ingests a trip starting yesterday. | Not applicable — step 12 owns this. It is here because it explains why there are two trips. |
+| A **webhook endpoint subscribed to `itinerary.updated`** | Step 21 asserts that a burst of three edits produced exactly **one** event, and it counts the engine's own delivery records to do it. No endpoint, no records, nothing to count. | Step 21 **fails**, naming both possible causes: no subscribed endpoint, or a webhook worker that is not running. It does not skip — see below. |
+
+Registering that endpoint is a console-session operation and this repo has no console flow, so it is a
+one-time setup step outside this code, exactly like collecting the API key. That is a real gap and it is
+listed as one; what it is not allowed to become is a quietly skipped assertion. **A step that cannot be
+verified is a failing step here, never a silently green one** — "no deliveries appeared" is
+indistinguishable from "the coalescer emitted nothing" unless the run stops and says which it could not
+tell apart.
+
 ## What each half proves
 
-| | `server/simulate.ts` | `browser/` |
-|---|---|---|
-| Runs as | the CRM's own backend | the manager's browser tab |
-| Entry point | `kaafil-js` | `kaafil-js/client` |
-| Credential | the partner API key, from `KAAFIL_API_KEY` | a short-lived manager session (`accessToken`/`refreshToken`), minted by the server half and pasted in by hand |
-| Resource groups available | all of them: `auth`, `shareTokens`, `trips`, `vendors`, `journey`, `webhooks`, `events` | only `journey` and `vendors` — every other group needs an API key a browser never has |
-| What it demonstrates | the full CRM-side lifecycle, plus the three typed-error lessons below | that the credential boundary is structural: `client.journey` throws `KaafilClientNotOpenError` before `open()`, and there is no way to reach it with an API key from this bundle |
+| | `server/simulate.ts` steps 1-11 | `server/simulate.ts` steps 12-22 | `browser/` |
+|---|---|---|---|
+| Runs as | the CRM's own backend | the manager's device, from Node | the manager's browser tab |
+| Entry point | `kaafil-js` | `on-ground/` for the writes, `kaafil-js` for step 22's reads | `kaafil-js/client` + `on-ground/` |
+| Credential | the partner API key, from `KAAFIL_API_KEY` | the manager session minted in step 8 — **an API-key write here is a `401` by design** | the same manager session, pasted in by hand, rotating itself from then on |
+| Resource groups available | all of them: `auth`, `shareTokens`, `trips`, `vendors`, `journey`, `webhooks`, `events` | the itinerary and rooming endpoints | `journey` and `vendors` — every other SDK group needs an API key a browser never has |
+| What it demonstrates | the full CRM-side lifecycle, plus the four typed-error lessons below | that the product is usable, not just that the endpoints answer: see the table below | that the credential boundary is structural (`client.journey` throws `KaafilClientNotOpenError` before `open()`), and that the rooming board renders from the server's own canon with no client-side colour maths |
 
-Together the two halves are the argument for shipping two entry points at all: the server half is
-trusted with the agency's credential, the browser half is trusted with nothing longer-lived than one
-manager's session, and the SDK enforces that split at the module-graph level rather than by convention.
+Together the halves are the argument for shipping two entry points at all: the server half is trusted
+with the agency's credential, the browser half is trusted with nothing longer-lived than one manager's
+session, and the SDK enforces that split at the module-graph level rather than by convention. The
+on-ground half adds a third credential story on top — **the person, not the integration**. An itinerary
+edit or a bed swap accepts a manager session and refuses an API key, on the grounds that a change to a
+day in progress has someone standing behind it.
+
+## The manager's day — what each of steps 12-22 proves
+
+Each row is a claim about the product, not about an endpoint returning 200. Every one of them is asserted
+in the run; none is printed and left for a reader to believe.
+
+| Step | The claim |
+|---|---|
+| 12 | A trip that spans **today** is ingested, with a six-person roster. The September trip from step 2 can never contain "now", so nothing about a live day could be tested against it. |
+| 13 | The itinerary's days are **already there** — one per trip day, contiguous from zero, one of them marked `today`. Nobody created them; there is no "initialise itinerary" call, because the derivation (whole days between local starts-of-day *in the trip's own timezone*) is not something a device's clock can do correctly. |
+| 14 | Three items are added, and the **server** assigns `sortOrder` 0, 1, 2 — appended at the tail in arrival order. A client that sends its own `sortOrder` is **refused `422`**, not quietly obeyed and not quietly ignored: two devices editing one day cannot both be right about an integer, so neither gets to say. |
+| 15 | `LIVE` is **derived on read and never stored**. The timed breakfast reads `LIVE` because the clock is inside its window; the untimed "free morning" on the same day, in the same response, reads `PLANNED` — the clock may not declare a free morning under way. And `LIVE` is absent from the write vocabulary outright, so a client cannot pin one. |
+| 16 | Completing and reordering keeps the day's run **densely `0..n-1`** and moves **no `startTime`**. Dense re-stamping is what makes two devices replaying the same drag land on the same integers; leaving times alone is the difference between "do this one first" and "this now happens an hour earlier". A terminal status also survives the reorder rather than being overwritten by the derived one. |
+| 17 | A `?since=` delta cursored on **the previous response's own `meta.serverTime`** returns only the changed row plus a **tombstone** for the deleted one, in the same array. This is the step to read twice — see the warning below. |
+| 18 | `auto-assign` with `dryRun: true` and then `dryRun: false` return **byte-identical** `plan`, `perRule`, `unassigned` and `deltas`, and the board is provably untouched between them. That is the contract the whole solver design exists to make testable, and it holds because `dryRun` never reaches the solver at all. `perRule` is total: a rule with nothing to do says so rather than being omitted. |
+| 19 | Every occupant chip renders from two fields the server already computed — `glyph` and `tone` — where `tone` is a **token** (`"male.3"`), never a hex. No hashing, no palette lookup, no gender branch, no arithmetic. |
+| 20 | The change log carries the day's edits as **sentences the server rendered**, attributed to a named manager. A client never composes "Moved X to position 2" from a `kind` and a metadata blob. |
+| 21 | Three edits inside one five-second window produce **exactly one** `itinerary.updated` event, counted by distinct `eventId` rather than by delivery record — delivery is at-least-once, so one event retried twice is three records. |
+| 22 | The CRM reads the finished day back through `kaafil.itinerary.read`, `kaafil.rooming.read` and `kaafil.itinerary.changeLog.list` on its **own API key** — that half of the surface genuinely is SDK-native. Then the same client tries `kaafil.itinerary.items.add` and is refused with `UnsatisfiableSchemeError` **before any request is built**: the credential boundary is a fact the SDK reads out of the vendored spec, not a `401` you discover in staging. |
+
+### The `?since=` cursor is the one thing to get right
+
+The engine's delta window is `updatedAt >= since - 5s`. Deliberately **at-least-once**: a literal
+`> since` loses rows permanently to the gap between reading a row and stamping the response, to clock
+skew between replicas, and to millisecond truncation — silently, every time.
+
+So the cursor is **the server's own clock**, taken from the last response's `meta.serverTime` and handed
+straight back. A cursor built from `new Date()` on your machine is a different clock: run a few hundred
+milliseconds ahead of the engine and you are asking for changes since a future instant. Nothing errors.
+You just quietly have an incomplete trip.
+
+Two consequences worth internalising before you write the consumer:
+
+- **The window reaches backward from the cursor**, so a delta may re-deliver a row you already have.
+  That is correct. Apply deltas **by id, idempotently** — never by counting them. (Step 17 *does* assert
+  an exact count, which is why it waits for a quiet moment *before* taking its cursor. That is a stronger
+  claim than a client ever needs to make, and getting the wait on the wrong side of the cursor is exactly
+  how the step was wrong the first time it was written.)
+- **A delete arrives as a tombstone, never as an absence.** `{ _tombstone: true, id, version, deletedAt }`
+  shares the one `data[]` array with live rows, so a paginated delta cannot drop deletions off the end of
+  a second array that has no cursor. Narrow the union before you read it; a consumer that forgets the
+  drop case keeps showing a cancelled item forever.
 
 ## What the SDK does for you, so you don't have to remember it
 
@@ -214,11 +302,57 @@ each other on purpose:
 in order from most specific to a generic transport fallback, so no branch in that page ever has to say
 just "something went wrong."
 
+### The on-ground half has exactly one error class, and that is the argument for the SDK
+
+`on-ground/client.ts` throws a single `OnGroundHttpError` carrying the status, the engine's `code` and
+`details` verbatim. Compare that with the branches above: no typed class per failure, no
+`isRetryable()` answer, no `err.fields`, no `ERROR_CODE_TABLE` lookup — the steps that use it branch on
+**string equality against `err.code`**, which is precisely the hand-maintained table `kaafil-js` exists to
+delete. It is in the repo at full visibility rather than hidden behind a similar-looking message, because
+the gap *is* the reason the SDK's error model is worth having. It goes away when `kaafil.itinerary` and
+`client.rooming` do.
+
+### The chips are the smallest good example of a boundary
+
+An occupant's identity mark is computed once, server-side, and published as `glyph` (initials, already
+uppercased) and `tone` (`"male.3"`). `occupantChip()` in `on-ground/chip.ts` renames the token's two
+halves into two CSS classes and does nothing else; `browser/styles.css` maps four families to four hues
+and eight shades to eight lightnesses. **The engine owns the identity; the consumer owns the palette.**
+
+Two details that are load-bearing rather than decorative:
+
+- `tone` is never a hex. An API that shipped a colour would be making a brand decision for every consumer
+  at once, and every consumer's palette would become a fork of the engine's.
+- Eight shades per family is frozen, not configurable, and it equals the maximum room capacity. A room is
+  the only place two chips sit side by side and have to be tellable apart, so eight is the smallest
+  modulus that never *forces* two occupants of one room to share a shade. Collisions across a whole trip
+  stay possible — the hash is not a permutation — so step 19 asserts the token's **range**, never its
+  uniqueness. A configurable value would render the same traveller two colours for two agencies and
+  destroy the entire point of a shared canon.
+
 ## What this repo deliberately does not do
 
-- **No partner-console flow.** The console is Kaafil's own control plane for minting keys and managing
-  entitlements, not part of an integration. This repo receives `KAAFIL_API_KEY` from the environment,
-  the same way a real integrator does after collecting a key from the console once, outside this code.
+- **The on-ground *writes* do not go through `kaafil-js`, because no SDK client can make one.** The SDK
+  has both groups: `kaafil.itinerary` and `kaafil.rooming`, and step 22 reads the whole day back through
+  them. But thirteen of those seventeen operations are writes accepting `managerAuth` alone; the groups
+  live on the API-key client, which refuses them locally with `UnsatisfiableSchemeError`; and
+  `KaafilClient` — the only entry that can hold a manager session — does not expose either group. So
+  steps 13-21 use `on-ground/`: one error class, one attempt per request, no retry ladder, no token
+  rotation, and response shapes restated by hand instead of derived from the contract. It gets **deleted
+  rather than migrated** the day `client.itinerary` / `client.rooming` exist, because a local copy of a
+  server's response shape that outlives its reason is exactly the drift the SDK exists to prevent. Read it
+  as a measurement of what the SDK gives you, not as a pattern to copy.
+- **No partner-console flow.** The console is Kaafil's own control plane for minting keys, managing
+  entitlements and registering webhook endpoints — not part of an integration. This repo receives
+  `KAAFIL_API_KEY` from the environment, the same way a real integrator does after collecting a key once,
+  outside this code. The consequence is real and named above: step 21 needs a webhook endpoint subscribed
+  to `itinerary.updated`, and cannot create one.
+- **The coalescing assertion counts the engine's delivery records, not a receiver's inbox.** Standing up a
+  webhook receiver would be a second moving part this repo does not own. Counting distinct `eventId`s in
+  the engine's own delivery ledger answers the question that was actually asked — *how many events were
+  emitted for a burst* — and the ledger is reachable with the API key already in hand. What it does not
+  prove is that a subscriber's server parsed and accepted the payload; the delivery rows' `status` says
+  the engine got a 2xx, and that is a different (weaker) claim, so the step does not assert on it.
 - **No `402 PLAN_FEATURE_DISABLED` demo.** Provoking a plan-entitlement failure requires a console-side
   change to the agency's plan, which is out of scope here. The dark-capability demo above shows the
   `422 mode` case instead, because it needs no console access at all.
@@ -226,6 +360,41 @@ just "something went wrong."
   an agency has zero vendor rows — and zero rows is not an empty `200`, it is a dark capability. The call
   answers `422` with `details.reason === 'data'`. Step 9 of the simulator demonstrates exactly that, and
   the interesting behaviour is the failure branches rather than a count.
+- **The browser half is read-only.** It opens a session, loads a journey, its capabilities and the rooming
+  board. It does not add an itinerary item or move a traveller between beds, so nothing here demonstrates
+  optimistic UI, an `If-Match` `409` and its recovery, or a drag-and-drop that has to converge with another
+  device. Those are the interesting client problems and they are not solved here.
+- **No cleanup.** Every run ingests fresh trips, travellers, rooms and itinerary items under new
+  `sim-…` external ids and leaves them in place. That is deliberate for a walkthrough you are meant to poke
+  at afterwards, and it is worth knowing before pointing this at anything but a scratch agency: nothing
+  here is torn down, and the row counts only go up.
+- **No offline queue.** Everything above is the *substrate* for one — `?since=` cursors, tombstones,
+  version guards, idempotency keys, a retryability table — and nothing above is one. There is no outbox, no
+  local store, no replay-on-reconnect. A consumer still has to build that; what this repo shows is that the
+  server side of it exists and behaves.
+
+### Still not demonstrated, though the endpoints exist
+
+Named individually rather than left as "and the rest", because each is a thing a reader might reasonably
+expect to find here:
+
+- **Manual bed assignment and swaps** (`POST rooming/assign`), including the displaced-traveller half of a
+  swap and the `MANUAL` vs `AUTO` distinction that decides which beds `auto-assign` may move.
+- **Stay-window CRUD**, and room/window deletion — which requires an explicit `force` query param when
+  beds are occupied, deliberately never a `DELETE` body.
+- **`423 LOCKED`.** All 13 on-ground *write* operations already publish it in the contract (the four reads
+  do not, and should not), and none can produce it yet: the close-out lock is mounted as a pass-through.
+  There is nothing to show, and a consumer will need to classify it as fatal/park when there is.
+- **Multi-window trips.** The walkthrough uses the single whole-trip stay window that ingest materialises,
+  so nothing here shows a multi-hotel itinerary where windows are contiguous and half-open (a checkout day
+  equal to the next window's check-in is legal).
+- **A `?since=` delta over the rooming board or the change log.** Both accept the cursor; only the
+  itinerary's is exercised.
+- **The coalesced payload's contents.** Step 21 asserts how many events arrived, not that the single
+  webhook body carried all three edits folded with terminal-wins.
+- **`COORDINATOR` read-only** (`422 READ_ONLY_ROLE`), and the `422 CAPABILITY_UNAVAILABLE` a
+  `PERSONALIZED` trip answers for rooming. Both need a second manager or a second trip whose only purpose
+  is a refusal.
 
 ## Licence
 

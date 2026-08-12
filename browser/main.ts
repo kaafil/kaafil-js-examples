@@ -22,6 +22,17 @@ import {
   type ManagerRefreshResult,
 } from 'kaafil-js/client';
 
+// The rooming board is not on `KaafilClient` yet. The SDK does have a `rooming`
+// group — but on the API-key client only (`kaafil.rooming`), which is exactly the
+// credential a browser must never hold. There is no `client.rooming`, so this
+// page uses `../on-ground/`, the stand-in, whose header says what it does
+// without. `occupantChip` is shared with `server/simulate.ts` on purpose: one
+// canon, one renderer, two halves.
+import { occupantChip } from '../on-ground/chip';
+import { createOnGroundClient, OnGroundHttpError } from '../on-ground/client';
+import type { Room, RoomingBoard } from '../on-ground/types';
+import { isTombstone } from '../on-ground/types';
+
 // --- element handles ---------------------------------------------------
 
 function requireElement<T extends HTMLElement>(id: string): T {
@@ -40,10 +51,12 @@ const tripRefInput = requireElement<HTMLInputElement>('tripRef');
 const openBtn = requireElement<HTMLButtonElement>('openBtn');
 const closeBtn = requireElement<HTMLButtonElement>('closeBtn');
 const loadBtn = requireElement<HTMLButtonElement>('loadBtn');
+const boardBtn = requireElement<HTMLButtonElement>('boardBtn');
 const probeBtn = requireElement<HTMLButtonElement>('probeBtn');
 
 const sessionStatus = requireElement<HTMLParagraphElement>('sessionStatus');
 const journeyOut = requireElement<HTMLPreElement>('journeyOut');
+const roomingOut = requireElement<HTMLDivElement>('roomingOut');
 
 const capabilitiesBodyMaybe = requireElement<HTMLTableElement>('capabilitiesTable').querySelector('tbody');
 if (capabilitiesBodyMaybe === null) {
@@ -128,6 +141,17 @@ if (stored !== undefined) {
 
 let client: KaafilClient | undefined;
 
+// The session's CURRENT access token, kept in step with the SDK's own rotation.
+//
+// `KaafilClient` holds and rotates its credential privately, which is right —
+// nothing outside it should be able to reach a token. The stand-in board client
+// below is outside it, so it needs the live value: the token pasted into the
+// form is only correct until the first refresh, and a stale one gets a 401 that
+// looks like a broken session rather than a stale copy. `onRefresh` (the one
+// hook this page implements anyway, to survive a reload) updates this too. It
+// disappears with the stand-in, the day `client.rooming` exists.
+let currentAccessToken: string | undefined;
+
 function appendLog(message: string): void {
   const item = document.createElement('li');
   item.textContent = `${new Date().toLocaleTimeString()} — ${message}`;
@@ -138,6 +162,7 @@ function setSessionOpenUi(open: boolean): void {
   openBtn.disabled = open;
   closeBtn.disabled = !open;
   loadBtn.disabled = !open;
+  boardBtn.disabled = !open;
   probeBtn.disabled = open; // the probe's whole point is calling this AFTER close
   sessionStatus.textContent = open ? 'Session: open.' : 'Session: not open.';
 }
@@ -230,6 +255,23 @@ function renderError(error: unknown): void {
     return;
   }
 
+  // Below the whole SDK hierarchy on purpose, because it is not part of it: the
+  // rooming board goes through `../on-ground/`, the stand-in for a `client.rooming`
+  // that does not exist yet, and its single error class carries the engine's
+  // `code` and nothing else. Every branch above gets a class, a retryability
+  // answer and (where it exists) a named field; this one gets a string compare.
+  // That gap is the argument for the SDK, stated where it is visible rather than
+  // hidden behind a similar-looking message.
+  if (error instanceof OnGroundHttpError) {
+    // `error.message` already opens with the status and the code — re-prefixing
+    // them here is how this branch first read "404 RESOURCE_NOT_FOUND — 404
+    // RESOURCE_NOT_FOUND — Trip not found.." on screen.
+    errorOut.textContent =
+      `${error.name}: ${error.message} — from the raw-endpoint stand-in, not from kaafil-js, so ` +
+      'there is no typed class and no isRetryable() answer for it. Both arrive when client.rooming does.';
+    return;
+  }
+
   // Not a KaafilError at all — a bug in this page, not in the SDK. Still
   // named, never a bare "something went wrong".
   errorOut.textContent = `Unexpected non-SDK error: ${error instanceof Error ? error.message : String(error)}`;
@@ -281,6 +323,102 @@ function renderCapabilities(rows: readonly CapabilityRow[]): void {
   }
 }
 
+// --- rooming board rendering -------------------------------------------------
+//
+// The proof that the glyph/tone canon is usable without a client design system
+// re-deriving it. Every chip here is `occupantChip(bed.occupant)` — the server's
+// own `glyph` verbatim, plus its `tone` token renamed into two CSS classes. No
+// hashing, no palette lookup, no gender branch, no arithmetic on the shade. The
+// colours live in `styles.css` because they are the consumer's decision; the
+// identity lives in the engine because it is the traveller's.
+
+function renderChip(bed: Room['beds'][number]): HTMLElement {
+  if (bed.occupant === null) {
+    const empty = document.createElement('span');
+    empty.className = 'bed-empty';
+    empty.textContent = '·';
+    empty.title = `Bed ${bed.bedLabel} is free`;
+    return empty;
+  }
+  const chip = occupantChip(bed.occupant);
+  const el = document.createElement('span');
+  // `className` from the helper, `textContent` from the server. Neither is
+  // computed here, which is the whole claim this function makes.
+  el.className = `chip ${chip.toneClass}`;
+  el.textContent = chip.glyph;
+  // The token is surfaced in the tooltip rather than translated away, so an
+  // integrator reading this page can see what the engine actually sent.
+  el.title = `${bed.occupant.fullName} — tone "${bed.occupant.tone}", assigned ${
+    bed.occupant.assignSource ?? 'unknown'
+  }`;
+  return el;
+}
+
+function renderRoomingBoard(board: RoomingBoard): void {
+  roomingOut.replaceChildren();
+
+  // Tombstones share the rooms array in a `?since=` delta — narrowed rather than
+  // cast, so a deleted room can never be drawn as an empty one.
+  const rooms = board.rooms.filter((row): row is Room => !isTombstone(row));
+
+  if (rooms.length === 0) {
+    roomingOut.textContent =
+      'No rooms on this trip yet. The stay window exists (trip ingest materialises it), but a ' +
+      'manager has not created rooms — run the server half, which does.';
+    return;
+  }
+
+  for (const room of rooms) {
+    const row = document.createElement('div');
+    row.className = 'room-row';
+
+    const code = document.createElement('span');
+    code.className = 'room-code';
+    code.textContent = room.code;
+    row.appendChild(code);
+
+    for (const bed of room.beds) {
+      const holder = document.createElement('span');
+      holder.className = 'bed';
+      const label = document.createElement('span');
+      label.className = 'bed-label';
+      label.textContent = bed.bedLabel;
+      holder.append(label, renderChip(bed));
+      row.appendChild(holder);
+    }
+
+    const meta = document.createElement('span');
+    meta.className = 'room-meta';
+    meta.textContent = `${room.roomType} · capacity ${String(room.capacity)} · ${room.status}`;
+    row.appendChild(meta);
+
+    roomingOut.appendChild(row);
+  }
+
+  const summary = document.createElement('p');
+  summary.className = board.summary.unassignedCount > 0 ? 'board-warn' : 'hint';
+  summary.textContent =
+    `${String(board.summary.assignedCount)} of ${String(board.summary.rosterCount)} travellers have a bed; ` +
+    `${String(board.summary.unassignedCount)} unassigned.`;
+  roomingOut.appendChild(summary);
+
+  // An unassigned traveller gets a chip too, in the same canon. They are the
+  // reason the board exists — omitting them would hide the only rows a manager
+  // has to act on.
+  if (board.unassigned.length > 0) {
+    const strip = document.createElement('div');
+    strip.className = 'room-row';
+    const label = document.createElement('span');
+    label.className = 'room-code';
+    label.textContent = 'unassigned';
+    strip.appendChild(label);
+    for (const occupant of board.unassigned) {
+      strip.appendChild(renderChip({ bedLabel: '', occupant, assignmentId: null, assignmentVersion: null }));
+    }
+    roomingOut.appendChild(strip);
+  }
+}
+
 // --- actions -----------------------------------------------------------------
 
 openBtn.addEventListener('click', () => {
@@ -327,10 +465,13 @@ openBtn.addEventListener('click', () => {
           refreshToken: result.refreshToken,
           tripRef: tripRefInput.value.trim(),
         });
+        // Keep the stand-in board client's copy in step — see `currentAccessToken`.
+        currentAccessToken = result.accessToken;
         appendLog('Session rotated automatically — new access/refresh pair saved.');
       },
     });
 
+    currentAccessToken = accessToken;
     saveStoredSession({ baseUrl, accessToken, refreshToken, tripRef });
     setSessionOpenUi(true);
     appendLog('Session opened.');
@@ -348,9 +489,11 @@ closeBtn.addEventListener('click', () => {
   // already dropped the credential the SDK was using, so nothing in this
   // tab still needs them sitting in storage.
   clearStoredSession();
+  currentAccessToken = undefined;
   setSessionOpenUi(false);
   journeyOut.textContent = 'Nothing loaded yet.';
   capabilitiesBody.innerHTML = '';
+  roomingOut.replaceChildren(document.createTextNode('Nothing loaded yet.'));
   appendLog('Session closed.');
 });
 
@@ -376,6 +519,39 @@ loadBtn.addEventListener('click', () => {
       const capabilities = await client.journey.capabilities({ tripRef });
       renderCapabilities(capabilities);
       appendLog(`Loaded journey and capabilities for "${tripRef}".`);
+    } catch (error) {
+      renderError(error);
+    }
+  })();
+});
+
+boardBtn.addEventListener('click', () => {
+  void (async () => {
+    clearError();
+    // The credential boundary still holds for the board: no open session means no
+    // token, and this refuses before building a request rather than sending one
+    // with `Bearer undefined`. `KaafilClientNotOpenError` is reused deliberately
+    // — it is the same failure, and inventing a parallel class for it would give
+    // this page two names for one thing.
+    if (client === undefined || currentAccessToken === undefined) {
+      renderError(new KaafilClientNotOpenError());
+      return;
+    }
+    const tripRef = tripRefInput.value.trim();
+    const baseUrl = baseUrlInput.value.trim();
+    if (tripRef === '' || baseUrl === '') {
+      renderError(new Error('Enter a base URL and a trip ref to load its rooming board.'));
+      return;
+    }
+
+    try {
+      const onGround = createOnGroundClient({ baseUrl, accessToken: currentAccessToken });
+      const board = await onGround.rooming.board({ tripRef });
+      renderRoomingBoard(board.data);
+      appendLog(
+        `Loaded the rooming board for "${tripRef}" — ${String(board.data.rooms.length)} room(s), ` +
+          `server clock ${board.meta.serverTime}.`,
+      );
     } catch (error) {
       renderError(error);
     }

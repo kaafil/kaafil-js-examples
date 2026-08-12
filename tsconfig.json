@@ -19,5 +19,8 @@
     "isolatedModules": true,
     "types": ["node"]
   },
-  "include": ["server/**/*.ts", "browser/**/*.ts"]
+  // `on-ground/` is imported by BOTH halves — the Node walkthrough and the
+  // browser page render the same rooming board from the same endpoint — so it
+  // sits beside them rather than inside either, and is type-checked with both.
+  "include": ["server/**/*.ts", "browser/**/*.ts", "on-ground/**/*.ts"]
 }

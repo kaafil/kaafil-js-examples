@@ -1,16 +1,31 @@
 /**
- * End-to-end lifecycle walkthrough of the `kaafil-js` server SDK, run from a
- * CRM backend's point of view: ingest a trip, push its manifest, assign a
- * manager, wait for the journey to build, inspect capabilities and triggers,
- * mint a browser session, and demonstrate the typed errors a caller actually
- * needs to branch on.
+ * A whole trip, end to end, in two halves.
+ *
+ * Steps 1-11 are the CRM's side, run from a backend holding the partner API
+ * key: ingest a trip, push its manifest, assign a manager, wait for the journey
+ * to build, inspect capabilities and triggers, mint a browser session, and
+ * demonstrate the typed errors a caller actually needs to branch on.
+ *
+ * Steps 12-22 are the day itself, mostly run on a MANAGER SESSION rather than the API
+ * key, because that is the engine's rule and not this file's preference: an
+ * on-ground write accepts `managerAuth` and only `managerAuth`. Read an
+ * itinerary whose days materialised themselves, add items the server orders,
+ * watch a timed card go LIVE while a free morning refuses to, complete and
+ * reorder, pull a `?since=` delta with a tombstone in it, fill the rooming board
+ * from a preview that IS the applied plan, render occupant chips from the
+ * server's own glyph and tone, read the day's change log, and prove that a burst
+ * of edits produces one webhook rather than one each. Step 22 closes the loop
+ * from the other side: the CRM reads that same day back through the SDK's own
+ * `itinerary`/`rooming` groups, and is refused — locally, before any request —
+ * when it tries to write with the wrong credential.
  *
  * This file is both a tutorial and a CI gate. Every step prints what it is
  * about to do, then asserts the result with `assertTrue`/`assertEquals`
  * below — a step that can't be verified is a failing step, never a silently
  * skipped one. Run it with `pnpm simulate` after `pnpm link:local` and a
  * populated `.env` (see `.env.example`); it needs a live `kaafil-engine`
- * with its background worker running, because step 5 waits on that worker.
+ * with its background worker running, because step 5 waits on that worker and
+ * step 21 waits on the coalescer's flush job.
  */
 
 import {
@@ -18,6 +33,7 @@ import {
   BookingStatus,
   ERROR_CODE_TABLE,
   EventType,
+  Gender,
   isKaafilError,
   isRetryable,
   Kaafil,
@@ -30,7 +46,22 @@ import {
   ManifestMode,
   PartyKind,
   TripMode,
+  UnsatisfiableSchemeError,
 } from 'kaafil-js';
+
+// The manager's half of the day (steps 13-21) does NOT go through `kaafil-js`,
+// and that is a statement about the SDK's current shape rather than a design
+// choice. `kaafil.itinerary` and `kaafil.rooming` DO exist — step 22 uses them —
+// but only on the API-key client, and thirteen of those seventeen operations are
+// writes that accept `managerAuth` alone. `KaafilClient`, the one entry that can
+// hold a manager session, does not expose either group yet, so no SDK code path
+// can perform an on-ground write today. `../on-ground/` is the deliberately small
+// stand-in that can, and its own header lists every SDK service it does without.
+// It is deleted, not migrated, the day `client.itinerary`/`client.rooming` exist.
+import { occupantChip, parseToneToken } from '../on-ground/chip';
+import { createOnGroundClient, OnGroundHttpError } from '../on-ground/client';
+import type { ItineraryItem, ItineraryRead, Occupant, Room } from '../on-ground/types';
+import { isTombstone } from '../on-ground/types';
 
 // ---------------------------------------------------------------------------
 // Tiny local assert helper. No test framework: this script IS the check, and
@@ -51,6 +82,21 @@ function assertEquals<T>(actual: T, expected: T, message: string): void {
     throw new AssertionFailure(`${message} (expected ${String(expected)}, got ${String(actual)})`);
   }
 }
+
+// Structural equality for the one claim that is ABOUT two whole structures
+// being the same: the auto-assign preview and the applied plan (step 18).
+// Canonical JSON rather than a field-by-field walk, because the assertion is
+// "these two are identical", and a hand-written comparison that skips a field
+// would be a weaker claim wearing the same words.
+function assertJsonEquals(actual: unknown, expected: unknown, message: string): void {
+  const left = JSON.stringify(actual);
+  const right = JSON.stringify(expected);
+  if (left !== right) {
+    throw new AssertionFailure(`${message}\n    preview: ${right}\n    applied: ${left}`);
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // A step failing should say WHICH step, not just what threw. Every step body
 // runs through this wrapper so a mid-run failure names its own number.
@@ -74,6 +120,24 @@ function requireEnv(name: string): string {
     );
   }
   return value;
+}
+
+// ---------------------------------------------------------------------------
+// Delta-row helpers for the on-ground steps. A `?since=` response mixes live
+// rows and tombstones in ONE array, so every read of one has to narrow first —
+// these exist so no step below can quietly treat a tombstone as a row.
+// ---------------------------------------------------------------------------
+
+function liveItems(read: ItineraryRead): readonly ItineraryItem[] {
+  return read.items.filter((row): row is ItineraryItem => !isTombstone(row));
+}
+
+function requireItem(read: ItineraryRead, itemId: string, label: string): ItineraryItem {
+  const found = liveItems(read).find((item) => item.id === itemId);
+  if (found === undefined) {
+    throw new AssertionFailure(`${label}: item ${itemId} is not in the itinerary read`);
+  }
+  return found;
 }
 
 async function main(): Promise<void> {
@@ -522,11 +586,899 @@ async function main(): Promise<void> {
     });
     passed++;
 
+    // ===================================================================
+    // Steps 12-22 — a real manager's working day, on the ground.
+    //
+    // Everything above is the CRM's side of the trip: ingest, manifest,
+    // assignment, the journey the engine built from them. Everything below is
+    // the day itself, driven by the person standing in the hotel lobby — and it
+    // runs on a MANAGER SESSION, not the API key, because that is the engine's
+    // rule rather than this file's preference: every on-ground write accepts
+    // `managerAuth` and only `managerAuth`. An API-key write is a 401 by design,
+    // on the grounds that an edit to a live day has a person behind it.
+    //
+    // The token pair is the one step 8 already minted. Nothing new is minted
+    // here, which is also the point: the browser half opens the very same pair.
+    // ===================================================================
+
     // -------------------------------------------------------------------
-    // Step 12 — close and summarize.
+    // Step 12 — a trip that spans TODAY, because the day is the subject.
+    //
+    // The step-2 trip sits in September 2026 and can therefore never have a
+    // live item, a "today" card, or a free morning under way — every clock
+    // assertion below would pass vacuously against it. So the on-ground half
+    // ingests its own trip, starting yesterday and ending in two days, and the
+    // assertions have something to be true OF.
     // -------------------------------------------------------------------
 
-    await step(12, 'close() the client', async () => {
+    const day = 86_400_000;
+    const onGroundExternalTripId = `sim-day-${runSuffix}`;
+
+    const onGroundTripRef = await step(
+      12,
+      'ingest a GROUP trip that spans today, with a six-person manifest',
+      async () => {
+        const upsert = await kaafil.trips.upsert({
+          externalTripId: onGroundExternalTripId,
+          externalAgencyId: agencyRef,
+          code: `SIM-DAY-${runSuffix}`,
+          name: 'Simulated On-Ground Day',
+          tripMode: TripMode.Group,
+          eventType: EventType.Trek,
+          startDate: new Date(Date.now() - day),
+          endDate: new Date(Date.now() + 2 * day),
+          sourceUpdatedAt: new Date(),
+        });
+
+        const now = new Date();
+        const roster: ManifestTraveller[] = [
+          {
+            externalTravellerId: `sim-day-a-${runSuffix}`,
+            fullName: 'Asha Rao',
+            gender: Gender.Female,
+            bookingStatus: BookingStatus.Confirmed,
+            party: { ref: `sim-day-couple-${runSuffix}`, kind: PartyKind.Couple, label: 'Rao' },
+            sourceUpdatedAt: now,
+          },
+          {
+            externalTravellerId: `sim-day-b-${runSuffix}`,
+            fullName: 'Kabir Rao',
+            gender: Gender.Male,
+            bookingStatus: BookingStatus.Confirmed,
+            party: { ref: `sim-day-couple-${runSuffix}`, kind: PartyKind.Couple, label: 'Rao' },
+            sourceUpdatedAt: now,
+          },
+          {
+            externalTravellerId: `sim-day-c-${runSuffix}`,
+            fullName: 'Meera Singh',
+            gender: Gender.Female,
+            // A dietary value on exactly one traveller, so the solver has a real
+            // preference to satisfy or to report relaxing — a rule that never had
+            // anything to do is a rule this walkthrough cannot show working.
+            dietary: 'JAIN',
+            bookingStatus: BookingStatus.Confirmed,
+            sourceUpdatedAt: now,
+          },
+          {
+            externalTravellerId: `sim-day-d-${runSuffix}`,
+            fullName: 'Devi Patel',
+            gender: Gender.Female,
+            bookingStatus: BookingStatus.Confirmed,
+            sourceUpdatedAt: now,
+          },
+          {
+            externalTravellerId: `sim-day-e-${runSuffix}`,
+            fullName: 'Farhan Ali',
+            gender: Gender.Male,
+            bookingStatus: BookingStatus.Confirmed,
+            sourceUpdatedAt: now,
+          },
+          {
+            externalTravellerId: `sim-day-f-${runSuffix}`,
+            fullName: 'Gopal Rao',
+            gender: Gender.Male,
+            bookingStatus: BookingStatus.Confirmed,
+            sourceUpdatedAt: now,
+          },
+        ];
+        const manifest = await kaafil.trips.travellers.pushManifest({
+          tripRef: upsert.tripId,
+          mode: ManifestMode.Merge,
+          travellers: roster,
+        });
+        assertEquals(manifest.manifestCount, roster.length, 'the on-ground manifest was short');
+
+        // The same manager as step 4. A manager token is scoped to the MANAGER,
+        // not to a trip — authorisation per trip comes from this assignment, so
+        // without it every write below would be refused even with a valid token.
+        await kaafil.trips.managers.assign({
+          tripRef: upsert.tripId,
+          managerRef,
+          isLead: true,
+          role: ManagerRole.Manager,
+          sourceUpdatedAt: new Date(),
+        });
+
+        console.log(`  tripId=${upsert.tripId} roster=${manifest.manifestCount} manager=${managerRef}`);
+        return upsert.tripId;
+      },
+    );
+    passed++;
+
+    const onGround = createOnGroundClient({
+      baseUrl,
+      accessToken: managerSession.accessToken,
+    });
+
+    // -------------------------------------------------------------------
+    // Step 13 — read the itinerary. The days are ALREADY THERE.
+    //
+    // Nobody created them. No "initialise itinerary" call exists, and adding one
+    // would put a client in charge of a derivation only the engine can do
+    // correctly: whole days between local starts-of-day IN THE TRIP'S OWN
+    // TIMEZONE, which is neither the device's nor the server's.
+    // -------------------------------------------------------------------
+
+    const firstRead = await step(
+      13,
+      'itinerary.read — days 0..durationDays-1 were materialised without anyone creating them',
+      async () => {
+        const { data } = await onGround.itinerary.read({ tripRef: onGroundTripRef });
+
+        assertEquals(
+          data.days.length,
+          data.trip.durationDays,
+          'the itinerary did not carry one day per trip day',
+        );
+        // Contiguous from zero, not merely the right count — a set of days with a
+        // gap in it has the right length and is still broken.
+        data.days.forEach((dayCard, index) => {
+          assertEquals(dayCard.dayIndex, index, `day ${String(index)} is out of sequence`);
+        });
+        assertEquals(liveItems(data).length, 0, 'a brand-new itinerary already had items');
+
+        // Exactly one card is today's, and the engine says which — derived in the
+        // trip's timezone. A client comparing `isoDate` to its own `new Date()`
+        // gets this wrong for every traveller in a different zone from the office.
+        const todayCards = data.days.filter((dayCard) => dayCard.position === 'today');
+        assertEquals(todayCards.length, 1, 'a trip spanning today did not have exactly one today card');
+        assertEquals(data.canAddItems, true, `itinerary is read-only: ${String(data.canAddItemsReason)}`);
+
+        console.log(
+          `  ${String(data.days.length)} days materialised in ${data.trip.timezone}: ` +
+            data.days.map((d) => `${String(d.dayIndex)}:${d.position}`).join(' '),
+        );
+        console.log(`  initialDayIso=${data.initialDayIso} (the card a device should open on)`);
+        return data;
+      },
+    );
+    passed++;
+
+    // The day the manager is standing in, plus its local bounds — both taken
+    // from the SERVER's own day cards. `isoDate` is that day's local midnight as
+    // an instant, so the next card's `isoDate` is this day's exclusive end. That
+    // is how the timed item below is placed inside the day without this file
+    // owning a single line of timezone arithmetic.
+    const todayCard = firstRead.days.find((card) => card.position === 'today');
+    if (todayCard === undefined) {
+      throw new AssertionFailure('no today card to work with — step 13 should have caught this');
+    }
+    const nextCard = firstRead.days.find((card) => card.dayIndex === todayCard.dayIndex + 1);
+    const todayEndMs =
+      nextCard !== undefined
+        ? Date.parse(nextCard.isoDate)
+        : Date.parse(firstRead.trip.endDate);
+    const todayStartMs = Date.parse(todayCard.isoDate);
+
+    // -------------------------------------------------------------------
+    // Step 14 — add three items. The SERVER assigns sortOrder.
+    //
+    // Three adds, no ordering information sent, and the answers come back 0, 1,
+    // 2 — appended at the day's tail in arrival order. The second probe is the
+    // other half of the same claim: a client that sends its own `sortOrder` is
+    // REFUSED, not quietly obeyed and not quietly ignored. Two devices editing
+    // one day cannot both be right about an integer, so neither gets to say.
+    // -------------------------------------------------------------------
+
+    // Clamped into the day's own local bounds rather than "now ± an hour": run
+    // this a few minutes before local midnight in the trip's timezone and an
+    // unclamped end time lands on tomorrow, which the engine refuses.
+    const nowMs = Date.now();
+    const liveStartMs = Math.max(nowMs - 10 * 60_000, todayStartMs);
+    const liveEndMs = Math.min(nowMs + 50 * 60_000, todayEndMs - 1_000);
+
+    const addedItems = await step(
+      14,
+      'three items added to today — the server assigns sortOrder 0,1,2 and refuses a client that sends one',
+      async () => {
+        const ids: string[] = [];
+        const requests: { title: string; body: Parameters<typeof onGround.itinerary.addItem>[0] }[] = [
+          {
+            title: 'Breakfast at the lodge',
+            body: {
+              tripRef: onGroundTripRef,
+              isoDate: todayCard.isoDate,
+              type: 'MEAL',
+              title: 'Breakfast at the lodge',
+              startTime: new Date(liveStartMs).toISOString(),
+              endTime: new Date(liveEndMs).toISOString(),
+            },
+          },
+          {
+            title: 'Free morning',
+            body: {
+              tripRef: onGroundTripRef,
+              isoDate: todayCard.isoDate,
+              type: 'OTHER',
+              title: 'Free morning',
+              description: 'No fixed time, on purpose. Step 15 is about what that means.',
+            },
+          },
+          {
+            title: 'Monastery walk',
+            body: {
+              tripRef: onGroundTripRef,
+              isoDate: todayCard.isoDate,
+              type: 'ACTIVITY',
+              title: 'Monastery walk',
+            },
+          },
+        ];
+
+        for (const [index, request] of requests.entries()) {
+          const { data } = await onGround.itinerary.addItem(request.body);
+          assertEquals(data['sortOrder'], index, `"${request.title}" was not appended at position ${String(index)}`);
+          assertEquals(data['version'], 1, `"${request.title}" was created at a version other than 1`);
+          ids.push(String(data['id']));
+          // The echoed `status` is already the DERIVED one, not the stored one —
+          // the timed item below comes back LIVE from its own create call. Worth
+          // seeing rather than asserting here: derivation happens on every read,
+          // including a write's echo, and step 15 is where that is the subject.
+          console.log(
+            `  "${request.title}" → sortOrder=${String(data['sortOrder'])} ` +
+              `version=${String(data['version'])} status(derived)=${String(data['status'])}`,
+          );
+        }
+
+        // The refusal, through the raw escape hatch — the typed `addItem` above
+        // has no `sortOrder` field to send, which is the ordinary way a consumer
+        // finds this out. `.strict()` bodies everywhere mean the engine did not
+        // have to write this rule; it would have had to weaken a schema to break it.
+        try {
+          await onGround.request({
+            method: 'POST',
+            path: `/api/v1/trips/${encodeURIComponent(onGroundTripRef)}/itinerary/items`,
+            body: { isoDate: todayCard.isoDate, title: 'Client-ordered item', sortOrder: 0 },
+          });
+          throw new AssertionFailure('a client-supplied sortOrder was accepted');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) {
+            throw err;
+          }
+          assertEquals(err.status, 422, 'a client-supplied sortOrder should be a 422');
+          assertEquals(err.code, 'VALIDATION_ERROR', 'the refusal should be a validation error');
+          console.log('  a client-supplied sortOrder → 422 VALIDATION_ERROR (rejected, never silently ignored)');
+        }
+
+        return { breakfastId: ids[0] ?? '', freeMorningId: ids[1] ?? '', walkId: ids[2] ?? '' };
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 15 — LIVE is derived on read, and the clock may not declare a
+    // free morning under way.
+    //
+    // This is a product decision, not an implementation detail. An item with a
+    // start time reads LIVE while the clock is inside its half-open window. An
+    // item WITHOUT one — "free morning", the most common card on a real day —
+    // never does, however much of today has passed, because nothing about a
+    // free morning becomes true at a particular minute.
+    //
+    // The pairing is what makes the assertion worth anything: both items sit on
+    // the same day and are read in the same request, so the timed one reading
+    // LIVE proves the clock genuinely is inside the day. Asserting only that the
+    // untimed item is not LIVE would pass just as well against a trip in 2029.
+    // -------------------------------------------------------------------
+
+    await step(
+      15,
+      'LIVE is derived, never stored — and an untimed item never reads LIVE even mid-day',
+      async () => {
+        const { data } = await onGround.itinerary.read({
+          tripRef: onGroundTripRef,
+          dayIndex: todayCard.dayIndex,
+        });
+
+        const breakfast = requireItem(data, addedItems.breakfastId, 'step 15');
+        const freeMorning = requireItem(data, addedItems.freeMorningId, 'step 15');
+
+        assertEquals(breakfast.status, 'LIVE', 'the timed item is not reading LIVE, so the clock is not inside its window');
+        assertTrue(breakfast.startTime !== null, 'the timed item lost its startTime');
+        assertEquals(freeMorning.startTime, null, 'the free morning was not untimed');
+        assertEquals(freeMorning.status, 'PLANNED', 'the clock declared an untimed item under way');
+
+        // And LIVE cannot be WRITTEN, which is the second, independent
+        // enforcement point: the PATCH body's status union omits it outright, so
+        // a client cannot pin a card as live and leave it live after the moment
+        // passed. `PLANNED|COMPLETED|SKIPPED` is the whole vocabulary.
+        try {
+          await onGround.itinerary.patchItem({
+            tripRef: onGroundTripRef,
+            itemId: addedItems.freeMorningId,
+            ifMatch: freeMorning.version,
+            patch: { status: 'LIVE' },
+          });
+          throw new AssertionFailure('a client was allowed to write status LIVE');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) {
+            throw err;
+          }
+          assertEquals(err.status, 422, 'writing LIVE should be a 422');
+          assertEquals(err.code, 'VALIDATION_ERROR', 'writing LIVE should fail validation');
+        }
+
+        console.log(`  "${breakfast.title}" (${String(breakfast.startTime)}) → ${breakfast.status}`);
+        console.log(`  "${freeMorning.title}" (untimed) → ${freeMorning.status} — the clock has no say here`);
+        console.log('  PATCH status=LIVE → 422 VALIDATION_ERROR (LIVE is not in the write vocabulary)');
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 16 — complete one item, reorder another. The run stays DENSE and
+    // no start time moves.
+    //
+    // Dense re-stamping (`0..n-1` across the whole day, in one transaction) is
+    // what makes two devices replaying the same drag land on the same integers.
+    // Not touching `startTime` is the other half: a manager reordering cards is
+    // saying "do this one first", never "and it now happens an hour earlier".
+    // -------------------------------------------------------------------
+
+    await step(
+      16,
+      'complete one item and reorder another — the day stays densely ordered and no startTime moves',
+      async () => {
+        const before = await onGround.itinerary.read({
+          tripRef: onGroundTripRef,
+          dayIndex: todayCard.dayIndex,
+        });
+        const startTimesBefore = new Map(
+          liveItems(before.data).map((item) => [item.id, item.startTime] as const),
+        );
+
+        const breakfast = requireItem(before.data, addedItems.breakfastId, 'step 16');
+        const completed = await onGround.itinerary.patchItem({
+          tripRef: onGroundTripRef,
+          itemId: breakfast.id,
+          // The version from the read that produced this row — `If-Match` here is
+          // a row version, not an ETag. A MISSING header is not "no opinion": the
+          // engine reads it as a version that can never match and answers 409, so
+          // an unconditional write is impossible rather than merely discouraged.
+          ifMatch: breakfast.version,
+          patch: { status: 'COMPLETED' },
+        });
+        assertEquals(completed.data['status'], 'COMPLETED', 'the item did not complete');
+        assertEquals(
+          completed.data['version'],
+          breakfast.version + 1,
+          'a successful guarded write did not bump the version',
+        );
+
+        const reorder = await onGround.itinerary.reorderItem({
+          tripRef: onGroundTripRef,
+          itemId: addedItems.walkId,
+          index: 0,
+        });
+        assertEquals(reorder.data.moved, true, 'the reorder reported no movement');
+
+        const run = reorder.data.items;
+        run.forEach((item, index) => {
+          assertEquals(item.sortOrder, index, `the day is not densely ordered at position ${String(index)}`);
+        });
+        assertEquals(run[0]?.id, addedItems.walkId, 'the reordered item did not land at index 0');
+        for (const item of run) {
+          assertEquals(
+            item.startTime,
+            startTimesBefore.get(item.id) ?? null,
+            `reordering moved "${item.title}"'s startTime`,
+          );
+        }
+        // A completed item stays completed through a reorder, and a terminal
+        // status is never overwritten by the derived one — the clock is still
+        // inside breakfast's window at this point in the run.
+        const completedAfter = run.find((item) => item.id === addedItems.breakfastId);
+        assertEquals(completedAfter?.status, 'COMPLETED', 'a terminal status was overwritten by the derived one');
+
+        console.log(
+          `  day ${String(reorder.data.dayIndex)} run: ` +
+            run.map((item) => `${String(item.sortOrder)}:${item.title}(v${String(item.version)})`).join(' → '),
+        );
+        console.log('  every startTime unchanged; only rows whose sortOrder actually moved bumped a version');
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 17 — a `?since=` delta, cursored on the PREVIOUS RESPONSE'S OWN
+    // `meta.serverTime`.
+    //
+    // THIS IS THE ONE AN INTEGRATOR GETS WRONG. The engine's delta window is
+    // `updatedAt >= since - 5s`: deliberately at-least-once, because a literal
+    // `> since` loses rows permanently to the gap between reading a row and
+    // stamping the response, to clock skew between replicas, and to millisecond
+    // truncation — silently, every time.
+    //
+    // So the cursor must be THE SERVER'S OWN CLOCK, taken from the last
+    // response's `meta.serverTime` and handed straight back. A cursor built from
+    // `new Date()` on this machine is a different clock: run a few hundred
+    // milliseconds ahead of the engine and it asks for changes since a future
+    // instant, and the rows written in between are never seen again. Nothing
+    // errors. The client just quietly has an incomplete trip.
+    //
+    // The 5s overlap is also why this step waits, and WHERE it waits is the
+    // part worth reading twice: the window reaches BACKWARD from the cursor, so
+    // anything written in the five seconds BEFORE it is returned as well. The
+    // quiet period therefore has to come before the cursor is taken, not after.
+    // Getting that backwards is not academic — it is how this step was first
+    // written, and the delta came back with three rows instead of two because
+    // step 16's reorder had bumped three of them a second earlier. The overlap
+    // was right and the assertion was wrong.
+    //
+    // (An integrator does not need this wait. At-least-once means a delta may
+    // legitimately re-deliver a row the client already has, and the fix is to
+    // apply deltas idempotently — by id — rather than to count them. The wait is
+    // here because THIS step asserts an exact count, which is a stronger claim
+    // than a client ever needs to make.)
+    // -------------------------------------------------------------------
+
+    await step(
+      17,
+      "?since= delta from the server's own serverTime — only changed rows, plus a tombstone for the deleted one",
+      async () => {
+        // Quiet FIRST, so step 16's writes fall outside the overlap that reaches
+        // back from the cursor taken next. See the note above.
+        await sleep(6_000);
+
+        const sync = await onGround.itinerary.read({ tripRef: onGroundTripRef });
+        const cursor = sync.meta.serverTime;
+        const knownIds = new Set(liveItems(sync.data).map((item) => item.id));
+        console.log(`  cursor = meta.serverTime of the last full read = ${cursor}`);
+
+        const freeMorning = requireItem(sync.data, addedItems.freeMorningId, 'step 17');
+        await onGround.itinerary.patchItem({
+          tripRef: onGroundTripRef,
+          itemId: freeMorning.id,
+          ifMatch: freeMorning.version,
+          patch: { title: 'Free morning (bazaar optional)' },
+        });
+
+        const walk = requireItem(sync.data, addedItems.walkId, 'step 17');
+        const deleted = await onGround.itinerary.deleteItem({
+          tripRef: onGroundTripRef,
+          itemId: walk.id,
+          ifMatch: walk.version,
+        });
+        assertEquals(deleted.data['_tombstone'], true, 'a delete did not answer with a tombstone');
+
+        const delta = await onGround.itinerary.read({ tripRef: onGroundTripRef, since: cursor });
+        const rows = delta.data.items;
+
+        assertEquals(rows.length, 2, 'the delta did not carry exactly the two rows that changed');
+
+        const changed = rows.filter((row): row is ItineraryItem => !isTombstone(row));
+        const tombstones = rows.filter(isTombstone);
+        assertEquals(changed.length, 1, 'the delta did not carry exactly one changed row');
+        assertEquals(tombstones.length, 1, 'the delta did not carry exactly one tombstone');
+        assertEquals(changed[0]?.id, addedItems.freeMorningId, 'the wrong row came back as changed');
+        assertEquals(changed[0]?.title, 'Free morning (bazaar optional)', 'the changed row is at a stale state');
+        assertEquals(tombstones[0]?.id, addedItems.walkId, 'the tombstone names the wrong row');
+
+        // The untouched rows stayed out. A delta that returns everything is not
+        // wrong so much as useless — it is the full read with extra steps.
+        assertTrue(
+          knownIds.has(addedItems.breakfastId) &&
+            !rows.some((row) => row.id === addedItems.breakfastId),
+          'an untouched row came back in the delta',
+        );
+
+        console.log(`  ${String(rows.length)} row(s) since the cursor:`);
+        for (const row of rows) {
+          console.log(
+            isTombstone(row)
+              ? `    TOMBSTONE id=${row.id} v${String(row.version)} deletedAt=${row.deletedAt}`
+              : `    changed  "${row.title}" v${String(row.version)}`,
+          );
+        }
+        console.log('  a deleted row arrives as a tombstone, in the SAME array — never as a silent absence');
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 18 — rooming: the stay window is already there, two rooms are not,
+    // and the dry run's plan IS the applied plan.
+    //
+    // "Preview then apply" is the promise the whole solver design exists to make
+    // testable. It holds because `dryRun` never reaches the solver: the same pure
+    // function answers both calls, and the only difference downstream is "also
+    // write, also emit". The alternative — a preview that projects and an
+    // applier that re-derives — can only ever be checked by eyeballing two
+    // outputs on one fixture, which any pair that happens to agree today passes.
+    // -------------------------------------------------------------------
+
+    const applied = await step(
+      18,
+      'rooming: auto-assign with dryRun, then apply — and the two plans are IDENTICAL',
+      async () => {
+        // Materialised by trip ingest, from the trip's own dates — the manager
+        // did not create it, exactly as with the itinerary's days.
+        const windows = await onGround.rooming.listStayWindows({ tripRef: onGroundTripRef });
+        assertTrue(windows.data.length >= 1, 'an ingested trip had no stay window at all');
+        const stayWindow = windows.data[0];
+        if (stayWindow === undefined) {
+          throw new AssertionFailure('unreachable: the stay-window list is non-empty');
+        }
+        console.log(`  stay window "${stayWindow.label}" (${stayWindow.id}) was materialised by ingest`);
+
+        const rooms: Room[] = [];
+        for (const code of ['L-101', 'L-102']) {
+          const created = await onGround.rooming.createRoom({
+            tripRef: onGroundTripRef,
+            stayWindowId: stayWindow.id,
+            code,
+            capacity: 3,
+            roomType: 'SHARED',
+          });
+          // Beds are SYNTHESISED from capacity — `A`..`H` — rather than stored.
+          // A client never posts a bed list, and cannot get one out of step.
+          assertEquals(created.data.beds.length, 3, `room ${code} did not synthesise three beds`);
+          assertEquals(created.data.status, 'EMPTY', `room ${code} was not created empty`);
+          rooms.push(created.data);
+        }
+        console.log(`  created ${String(rooms.length)} rooms: ${rooms.map((r) => `${r.code}[${r.beds.map((b) => b.bedLabel).join('')}]`).join(' ')}`);
+
+        const preview = await onGround.rooming.autoAssign({
+          tripRef: onGroundTripRef,
+          stayWindowId: stayWindow.id,
+          dryRun: true,
+        });
+        assertEquals(preview.data.dryRun, true, 'the preview did not report itself as a dry run');
+        assertTrue(preview.data.plan.length > 0, 'the preview planned nobody');
+
+        // A dry run that wrote something would still return a plausible plan, so
+        // the board is read BETWEEN the two calls. Zero occupied beds is the
+        // whole claim of the word "dry".
+        const between = await onGround.rooming.board({ tripRef: onGroundTripRef });
+        const occupiedAfterPreview = between.data.rooms
+          .filter((row): row is Room => !isTombstone(row))
+          .flatMap((room) => room.beds)
+          .filter((bed) => bed.occupant !== null).length;
+        assertEquals(occupiedAfterPreview, 0, 'the dry run wrote to the board');
+
+        const apply = await onGround.rooming.autoAssign({
+          tripRef: onGroundTripRef,
+          stayWindowId: stayWindow.id,
+          dryRun: false,
+        });
+        assertEquals(apply.data.dryRun, false, 'the apply reported itself as a dry run');
+
+        assertJsonEquals(apply.data.plan, preview.data.plan, 'the applied plan differs from the preview');
+        assertJsonEquals(apply.data.perRule, preview.data.perRule, 'the applied rule report differs from the preview');
+        assertJsonEquals(apply.data.unassigned, preview.data.unassigned, 'the applied unassigned list differs from the preview');
+        assertJsonEquals(apply.data.deltas, preview.data.deltas, 'the applied deltas differ from the preview');
+
+        // `perRule` is TOTAL over the rules that ran: a rule with nothing to do
+        // says so, because an omitted entry is indistinguishable from a step that
+        // never ran. And a relaxation always carries its reason — a solver that
+        // quietly relaxed a rule is the failure a manager discovers at a desk.
+        console.log(`  plan: ${String(apply.data.plan.length)} placement(s), unassigned: ${String(apply.data.unassigned.length)}`);
+        for (const rule of apply.data.perRule) {
+          console.log(`    ${rule.rule.padEnd(13)} ${rule.outcome.padEnd(8)} ${rule.reason}`);
+        }
+        console.log('  dryRun:true and dryRun:false returned byte-identical plan, perRule, unassigned and deltas');
+        return apply.data;
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 19 — the occupant chip, rendered from the server's glyph and tone.
+    //
+    // No client-side colour maths: no hashing a traveller id, no palette keyed
+    // on gender, no index into a list. The engine publishes `glyph` (initials,
+    // uppercased) and `tone` (a TOKEN like "male.3"), and the consumer's only
+    // job is to map that token to whatever its own design system calls that
+    // shade. `browser/styles.css` holds the actual colours, which is the point
+    // of the split: the engine owns the identity, the brand owns the palette.
+    // -------------------------------------------------------------------
+
+    await step(
+      19,
+      'occupant chips render from the server-supplied glyph and tone — no client-side colour maths',
+      async () => {
+        const board = await onGround.rooming.board({ tripRef: onGroundTripRef });
+        const rooms = board.data.rooms.filter((row): row is Room => !isTombstone(row));
+        const occupants: Occupant[] = rooms
+          .flatMap((room) => room.beds)
+          .map((bed) => bed.occupant)
+          .filter((occupant): occupant is Occupant => occupant !== null);
+
+        assertEquals(
+          occupants.length,
+          applied.plan.length,
+          'the board does not show the plan that was applied',
+        );
+        assertEquals(board.data.summary.unassignedCount, 0, 'the board still reports unassigned travellers');
+
+        for (const occupant of occupants) {
+          const token = parseToneToken(occupant.tone);
+          if (token === undefined) {
+            throw new AssertionFailure(`tone "${occupant.tone}" is not a token — a chip cannot read it`);
+          }
+          // A hex here would mean the engine had started shipping brand colour,
+          // and every consumer's palette would be a fork of the engine's.
+          assertTrue(!occupant.tone.startsWith('#'), `tone "${occupant.tone}" is a colour, not a token`);
+          assertTrue(
+            ['male', 'female', 'other', 'unknown'].includes(token.family),
+            `tone family "${token.family}" is outside the published vocabulary`,
+          );
+          // Eight shades per family: it equals the maximum room capacity, which
+          // is the only scope in which "two chips side by side differ" means
+          // anything. Collisions across a whole trip stay possible — the hash is
+          // not a permutation — so this asserts the RANGE, never uniqueness.
+          assertTrue(token.shade >= 0 && token.shade <= 7, `tone shade ${String(token.shade)} is out of range`);
+          assertTrue(occupant.glyph.length > 0, `${occupant.fullName} has an empty glyph`);
+          assertEquals(
+            occupant.glyph,
+            occupant.glyph.toUpperCase(),
+            `glyph "${occupant.glyph}" arrived un-uppercased`,
+          );
+        }
+
+        // The chip renderer takes the mark's two fields and NOTHING else — it
+        // cannot reach a name, a gender or an id, so it cannot derive anything
+        // from them even by accident. `browser/main.ts` renders the board with
+        // this same function.
+        console.log('  room   bed  chip  tone token   CSS class (colour lives in the consumer, not the API)');
+        for (const room of rooms) {
+          for (const bed of room.beds) {
+            if (bed.occupant === null) {
+              continue;
+            }
+            const chip = occupantChip(bed.occupant);
+            console.log(
+              `  ${room.code.padEnd(6)} ${bed.bedLabel.padEnd(4)} [${chip.glyph.padEnd(2)}] ` +
+                `${bed.occupant.tone.padEnd(12)} .${chip.toneClass}   ${bed.occupant.fullName}`,
+            );
+          }
+        }
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 20 — the day's change log, in sentences the server wrote.
+    //
+    // Every edit above left a line here, and each line arrives already rendered:
+    // `summary` is a sentence, `kindLabel` is a heading, `createdAtLabel` is a
+    // human time. That is deliberate rather than lazy — a client composing "Moved
+    // X to position 2" from a `kind` and a `metadata` blob is a second renderer
+    // that has to be kept in step with the first one forever, and the trail's
+    // whole job is to say what happened in words a traveller-facing manager can
+    // repeat back.
+    //
+    // The vocabulary is closed at nine kinds, and re-opening a completed item is
+    // NOT a tenth: it logs `ITEM_UPDATED` carrying the before/after status.
+    // -------------------------------------------------------------------
+
+    await step(20, "the itinerary change log — the day's edits, as sentences the server rendered", async () => {
+      const log = await onGround.itinerary.changeLog({ tripRef: onGroundTripRef });
+      const entries = log.data;
+      assertTrue(entries.length > 0, 'the change log was empty after a day of edits');
+
+      // Newest first, so the top of the list is what just happened.
+      const times = entries.map((entry) => Date.parse(entry.createdAt));
+      times.forEach((time, index) => {
+        const previous = times[index - 1];
+        if (previous !== undefined) {
+          assertTrue(previous >= time, 'the change log is not ordered newest-first');
+        }
+      });
+
+      // Every edit this walkthrough made is named. The set, not the count: the
+      // engine may log more than these (and should be free to), but it may not
+      // log fewer — an edit missing from the trail is the failure mode that makes
+      // an audit trail worth nothing.
+      for (const kind of ['ITEM_ADDED', 'ITEM_COMPLETED', 'ITEM_REORDERED', 'ITEM_UPDATED', 'ITEM_DELETED']) {
+        assertTrue(
+          entries.some((entry) => entry.kind === kind),
+          `no ${kind} entry in the change log`,
+        );
+      }
+
+      for (const entry of entries) {
+        assertTrue(entry.summary.length > 0, `${entry.kind} arrived with no rendered summary`);
+        assertTrue(entry.kindLabel.length > 0, `${entry.kind} arrived with no rendered label`);
+        // A person, not a token: these writes went through a manager session, so
+        // the trail says MANAGER and names them. An API-key write cannot appear
+        // here at all, because an on-ground write with an API key is a 401.
+        assertEquals(entry.actorType, 'MANAGER', `${entry.kind} was attributed to ${entry.actorType}`);
+      }
+
+      console.log(`  ${String(entries.length)} entries, newest first:`);
+      for (const entry of entries.slice(0, 8)) {
+        console.log(`    ${entry.kind.padEnd(15)} ${String(entry.actorName)} — ${entry.summary}`);
+      }
+    });
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 21 — one coalesced `itinerary.updated` for a burst of edits.
+    //
+    // A manager tapping eight items in a row must produce ONE webhook, not
+    // eight. The cadence (5 seconds, trailing, per trip) is CRM-facing contract,
+    // so the number below is the assertion rather than an implementation detail.
+    //
+    // OBSERVED THROUGH DELIVERY RECORDS, AND COUNTED BY DISTINCT `eventId`.
+    // A webhook receiver of our own would be a second moving part this repo does
+    // not own; the engine's own delivery ledger is reachable with the API key
+    // this file already has. What it must NOT be counted by is RECORDS: delivery
+    // is at-least-once with a retry ladder, and one event redelivered twice is
+    // three records. Counting records would report a coalescing failure that
+    // never happened.
+    //
+    // The precondition — an endpoint subscribed to `itinerary.updated` — cannot
+    // be created from here: endpoint CRUD is a console-session operation, and
+    // this repo deliberately has no console flow. So this step FAILS, naming
+    // both possible causes, rather than skipping: a step that cannot be verified
+    // is a failing step, and "no deliveries appeared" is indistinguishable from
+    // "the coalescer emitted nothing" if it is allowed to pass quietly.
+    // -------------------------------------------------------------------
+
+    await step(
+      21,
+      'a burst of three edits inside one 5s window produces EXACTLY ONE itinerary.updated event',
+      async () => {
+        const eventIdsFor = async (): Promise<Set<string>> => {
+          const page = await kaafil.webhooks.deliveries.listPage({
+            eventType: 'itinerary.updated',
+            limit: 100,
+          });
+          return new Set(page.map((delivery) => delivery.eventId));
+        };
+
+        // Steps 14-17 edited this trip, and their own coalesced flush is still in
+        // flight for up to a window plus a queue hop. Baselining before it lands
+        // would count it as a second event here — a dirty fixture reported as a
+        // contract failure. The rooming steps above already bought most of this.
+        await sleep(9_000);
+        const before = await eventIdsFor();
+        console.log(`  ${String(before.size)} itinerary.updated event(s) already on record before the burst`);
+
+        // Three edits, back to back, on a future day — no If-Match, no waiting,
+        // exactly what a manager's thumb does.
+        const burstDay = firstRead.days.find((card) => card.position === 'future') ?? todayCard;
+        for (const n of [1, 2, 3]) {
+          await onGround.itinerary.addItem({
+            tripRef: onGroundTripRef,
+            isoDate: burstDay.isoDate,
+            title: `Burst edit ${String(n)}`,
+          });
+        }
+        console.log(`  3 items added to day ${String(burstDay.dayIndex)} inside one window`);
+
+        // Poll for the flush, then wait one more window's worth: stopping at the
+        // first new event would pass before a second one could disprove it, which
+        // is the one thing this assertion is for.
+        let after = before;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          await sleep(3_000);
+          after = await eventIdsFor();
+          if ([...after].some((id) => !before.has(id))) {
+            break;
+          }
+        }
+        await sleep(8_000);
+        after = await eventIdsFor();
+
+        const fresh = [...after].filter((id) => !before.has(id));
+        if (fresh.length === 0) {
+          throw new AssertionFailure(
+            'no itinerary.updated delivery appeared for the burst. Two causes, and they are ' +
+              'different problems: (1) no webhook endpoint on this agency subscribes to ' +
+              'itinerary.updated, so there is nothing to observe — register one (console-session ' +
+              'operation, outside this repo, see the README); or (2) the engine\'s webhook worker ' +
+              'is not running, so the coalescer\'s flush job never executed. This step will not ' +
+              'pass on an unobservable stack.',
+          );
+        }
+        assertEquals(
+          fresh.length,
+          1,
+          'three edits inside one 5s window did not coalesce into a single event',
+        );
+        console.log(`  1 new event for 3 edits: ${String(fresh[0])} — the frozen 5s trailing cadence`);
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 22 — back at the CRM: read the manager's day through the SDK, and
+    // watch the SAME client refuse to write it.
+    //
+    // `kaafil.itinerary` and `kaafil.rooming` exist on the API-key client, and
+    // the four READ operations accept `apiKeyAuth` — so a CRM backend can poll
+    // what its managers did on the ground with the credential it already has,
+    // through generated types, with the retry ladder and the typed errors. That
+    // is what this step exercises, and it is the reason steps 13-21 do not use
+    // these groups: THIRTEEN of the seventeen operations are writes, they accept
+    // `managerAuth` and only `managerAuth`, and the API-key client cannot present
+    // one.
+    //
+    // The refusal below is the part worth watching. It is thrown by the SDK
+    // BEFORE any request is built — `UnsatisfiableSchemeError`, from the vendored
+    // spec's own per-operation scheme table. The credential boundary is not a
+    // 401 you discover in staging; it is a local type-level fact the SDK can see
+    // and does. (Which is also why the manager-session half of this walkthrough
+    // still goes through `../on-ground/`: `KaafilClient`, the only entry that can
+    // hold a manager session, does not expose these two groups yet. When it does,
+    // that directory is deleted and steps 13-21 become ordinary SDK calls.)
+    // -------------------------------------------------------------------
+
+    await step(22, 'the CRM reads the manager’s day through kaafil.itinerary / kaafil.rooming', async () => {
+      const itinerary = await kaafil.itinerary.read({ tripRef: onGroundTripRef });
+      assertEquals(itinerary.days.length, 4, 'the SDK read a different number of days');
+      assertTrue(itinerary.meta.serverTime.length > 0, 'the SDK read carried no serverTime');
+
+      // Asserted as a SET, never a count: step 21's burst added three more items
+      // to another day, and a count here would break the moment that step
+      // changed for reasons that have nothing to do with this one.
+      const ids = new Set(itinerary.items.map((row) => row.id));
+      assertTrue(ids.has(addedItems.breakfastId), 'the completed item is missing from the SDK read');
+      assertTrue(ids.has(addedItems.freeMorningId), 'the free morning is missing from the SDK read');
+      assertTrue(!ids.has(addedItems.walkId), 'the deleted item is still in a full (non-delta) read');
+
+      const board = await kaafil.rooming.read({ tripRef: onGroundTripRef });
+      assertEquals(board.summary.assignedCount, applied.plan.length, 'the SDK board disagrees with the applied plan');
+      assertEquals(board.rooms.length, 2, 'the SDK board shows a different number of rooms');
+
+      const log = await kaafil.itinerary.changeLog.list({ tripRef: onGroundTripRef });
+      assertTrue(log.length > 0, 'the SDK read an empty change log');
+
+      console.log(
+        `  kaafil.itinerary.read → ${String(itinerary.days.length)} days, ` +
+          `${String(itinerary.items.length)} item row(s); changeLog → ${String(log.length)} entries`,
+      );
+      console.log(
+        `  kaafil.rooming.read → ${String(board.rooms.length)} rooms, ` +
+          `${String(board.summary.assignedCount)}/${String(board.summary.rosterCount)} travellers placed`,
+      );
+
+      try {
+        await kaafil.itinerary.items.add({
+          tripRef: onGroundTripRef,
+          isoDate: todayCard.isoDate,
+          title: 'Written with the wrong credential',
+        });
+        throw new AssertionFailure('an API-key client was allowed to write an itinerary item');
+      } catch (err) {
+        if (!(err instanceof UnsatisfiableSchemeError)) {
+          throw err;
+        }
+        // No status, no code, no request id — because there was no request. The
+        // SDK knew from the spec that this credential could never satisfy the
+        // operation, and said so instead of spending a round trip to be told.
+        console.log(`  kaafil.itinerary.items.add with an API key → ${err.constructor.name}, offline: ${err.message}`);
+      }
+    });
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 23 — close and summarize.
+    // -------------------------------------------------------------------
+
+    await step(23, 'close() the client', async () => {
       kaafil.close(); // synchronous — no in-flight request survives it
     });
     passed++;
@@ -534,6 +1486,12 @@ async function main(): Promise<void> {
     console.log(`\nAll ${passed} steps passed.`);
     console.log('\nTo run the browser half, start it with the manager session pair printed in step 8:');
     console.log('  pnpm dev   (from this repo, then open browser/ and call client.session.open() with that pair)');
+    // The board only exists on the on-ground trip — the step-2 trip has no rooms
+    // and no roster to place. Printed by name because pasting the wrong ref into
+    // the browser half reads as an empty board rather than as the wrong trip.
+    console.log(`\nTrip refs for the browser half:`);
+    console.log(`  journey + capabilities : ${tripRef}`);
+    console.log(`  rooming board          : ${onGroundTripRef}   (the one with rooms and a filled board)`);
   } catch (err) {
     console.error(`\nStep ${currentStep} FAILED: ${err instanceof Error ? err.message : String(err)}`);
     if (err instanceof ApiKeyEnvironmentMismatchError) {

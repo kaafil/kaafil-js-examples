@@ -206,3 +206,135 @@ tr.capability-lit td.enabled-cell {
   background: transparent;
   color: var(--muted);
 }
+
+/* ── The rooming board, and the ONLY place a chip colour exists ───────────────
+
+   The engine publishes an occupant's identity mark as `glyph` + `tone`, and
+   `tone` is a token (`male.3`), never a hex — deliberately, because a colour is
+   a brand decision and an API that shipped one would be making it for every
+   consumer at once. So this stylesheet is where the decision gets made, and
+   nowhere in TypeScript is.
+
+   Twelve rules, not thirty-two: the token's two halves map independently — the
+   family picks a hue, the shade picks a lightness. Eight shades per family is
+   the engine's frozen constant and it equals the maximum room capacity, which
+   is the whole point of the number: a room is the only place two chips sit side
+   by side and have to be tellable apart, so eight is the smallest modulus that
+   never FORCES two occupants of one room to share a shade. Collisions across a
+   whole trip stay possible; they are just no longer unavoidable. */
+
+.rooming-board {
+  font-size: 0.9rem;
+}
+
+.room-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.room-row:last-child {
+  border-bottom: none;
+}
+
+.room-code {
+  font-weight: 600;
+  min-width: 5.5rem;
+}
+
+.room-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.bed {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.bed-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  /* Filled from the two classes below. The fallbacks are grey rather than a
+     guessed hue: an unreadable token must still render a chip — a traveller
+     silently missing from a board is discovered at a hotel desk at 11pm — and
+     it must look wrong rather than plausible. */
+  background: hsl(var(--chip-h, 0) var(--chip-s, 0%) var(--chip-l, 45%));
+  color: #fff;
+}
+
+.chip.tone-family-male {
+  --chip-h: 212;
+  --chip-s: 62%;
+}
+.chip.tone-family-female {
+  --chip-h: 330;
+  --chip-s: 55%;
+}
+.chip.tone-family-other {
+  --chip-h: 152;
+  --chip-s: 48%;
+}
+.chip.tone-family-unknown {
+  --chip-h: 45;
+  --chip-s: 40%;
+}
+
+.chip.tone-shade-0 {
+  --chip-l: 26%;
+}
+.chip.tone-shade-1 {
+  --chip-l: 31%;
+}
+.chip.tone-shade-2 {
+  --chip-l: 36%;
+}
+.chip.tone-shade-3 {
+  --chip-l: 41%;
+}
+.chip.tone-shade-4 {
+  --chip-l: 46%;
+}
+.chip.tone-shade-5 {
+  --chip-l: 51%;
+}
+.chip.tone-shade-6 {
+  --chip-l: 56%;
+}
+.chip.tone-shade-7 {
+  --chip-l: 61%;
+}
+
+.bed-empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  height: 2rem;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.board-warn {
+  color: var(--danger);
+  font-size: 0.85rem;
+}
