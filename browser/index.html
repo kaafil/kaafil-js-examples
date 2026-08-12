@@ -39,6 +39,7 @@
           <button id="openBtn" type="button">Open session</button>
           <button id="closeBtn" type="button" disabled>Close session</button>
           <button id="loadBtn" type="button" disabled>Load journey + capabilities</button>
+          <button id="boardBtn" type="button" disabled>Load rooming board</button>
           <button id="probeBtn" type="button" disabled>Read after close (prove the boundary)</button>
         </div>
         <p class="status" id="sessionStatus">Session: not open.</p>
@@ -72,8 +73,22 @@
         </div>
       </section>
 
+      <section class="panel" aria-labelledby="rooming-heading">
+        <h2 id="rooming-heading">4. Rooming board</h2>
+        <p class="hint">
+          Every chip below is drawn from two fields the engine already computed for that traveller:
+          <code>glyph</code> (their initials) and <code>tone</code> (a token like <code>male.3</code> —
+          never a hex). This page runs <strong>no colour maths at all</strong>: it does not hash a
+          traveller id, index a palette, or branch on gender. <code>occupantChip()</code> renames the
+          token into two CSS classes, and <code>styles.css</code> — the consumer's own design system —
+          is the only place an actual colour appears. That split is why the same traveller looks the
+          same here, on the seating grid, and in any other screen that reads the same canon.
+        </p>
+        <div id="roomingOut" class="rooming-board">Nothing loaded yet.</div>
+      </section>
+
       <section class="panel" aria-labelledby="log-heading">
-        <h2 id="log-heading">4. Session log</h2>
+        <h2 id="log-heading">5. Session log</h2>
         <p class="hint">
           Token rotation is fully automatic — the SDK exchanges the refresh token itself, pre-emptively
           and on a 401, with no code from this page. The only line this page contributes is
@@ -84,7 +99,7 @@
       </section>
 
       <section class="panel error-panel" aria-labelledby="error-heading">
-        <h2 id="error-heading">5. Error panel</h2>
+        <h2 id="error-heading">6. Error panel</h2>
         <div id="errorOut" class="error-out">No error yet.</div>
       </section>
     </main>
