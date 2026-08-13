@@ -17,22 +17,32 @@ manager session is scoped to one manager and expires in minutes. Splitting them 
 means the browser bundle has no code path that could reach the API-key branch even by accident — it is
 not just a convention, `kaafil-js/client` literally never imports the API-key code.
 
-- `server/simulate.ts` — 23 numbered steps in two halves. Steps 1-11 are the **CRM's side**, run on the
+- `server/simulate.ts` — 33 numbered steps in three parts. Steps 1-11 are the **CRM's side**, run on the
   partner API key: ingest a trip, push a manifest, assign a manager, wait for the journey to build, read
   capabilities and triggers, mint a manager session, and demonstrate the typed errors you actually need
-  to branch on. Steps 12-22 are **a manager's working day**, run on a manager session: an itinerary whose
-  days materialised themselves, items the server orders, a timed card going LIVE while a free morning
-  refuses to, a `?since=` delta with a tombstone in it, a rooming board filled from a preview that *is*
-  the applied plan, occupant chips drawn from the server's own glyph and tone, the day's change log, and
-  one webhook for a burst of edits rather than one each. Step 22 closes the loop from the other side: the
-  CRM reads that same day back through `kaafil.itinerary` / `kaafil.rooming`, and is refused *locally,
-  before any request* when it tries to write with the wrong credential.
+  to branch on. Steps 12-22 are **a manager's working day** on the itinerary and rooming surfaces, run on
+  a manager session: an itinerary whose days materialised themselves, items the server orders, a timed
+  card going LIVE while a free morning refuses to, a `?since=` delta with a tombstone in it, a rooming
+  board filled from a preview that *is* the applied plan, occupant chips drawn from the server's own
+  glyph and tone, the day's change log, and one webhook for a burst of edits rather than one each. Step
+  22 closes the loop from the other side: the CRM reads that same day back through `kaafil.itinerary` /
+  `kaafil.rooming`, and is refused *locally, before any request* when it tries to write with the wrong
+  credential. **Steps 23-32 are the rest of the boarding day** (Phase 10B): a fleet with a road vehicle
+  that refuses a seat layout and a flight that gets one, a seat-less assignment and a "seat pending" one
+  that are equally legal, an auto-assign preview that is byte-identical to its own apply, a `noop` outcome
+  that is a different fact from an omitted rule, two pickup stops closed under two different policies, a
+  trek's postpone rippling into the itinerary and the stay window while pickup times explicitly do not
+  move, and a module-local error code (`NOT_A_TREK`) caught and named directly, not read out of a details
+  string. Step 33 closes the client.
 - `browser/` — the manager's-device half. A small static page that opens a session with the token pair
   the server half printed, and loads a journey, its capabilities, and the rooming board with it.
-- `on-ground/` — a small stand-in HTTP client for the itinerary and rooming **writes**, shared by both
-  halves. **It is temporary and it says so.** `kaafil-js` does have both groups now, on the API-key client;
-  what it has no path to, from any credential, is a write. See
-  [What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do).
+- `on-ground/` — a small stand-in HTTP client for the itinerary, rooming, seating, pickup-points and
+  treks **writes**, shared by both halves. **It is temporary and it says so.** `kaafil-js` has typed
+  `itinerary`/`rooming` resource groups now, on the API-key client; what it has no path to, from any
+  credential, is a write on either of them. `seating`/`pickups`/`treks` go through `on-ground/` for a
+  second, simpler reason: at the time this repo was extended for Phase 10B, `kaafil-js` had no resource
+  groups for those three modules at all — a sibling agent's SDK work for that wave had not landed (see
+  [What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do)).
 
 ## Five-minute start
 
@@ -163,6 +173,20 @@ verified is a failing step here, never a silently green one** — "no deliveries
 indistinguishable from "the coalescer emitted nothing" unless the run stops and says which it could not
 tell apart.
 
+### Steps 23-32 need `transport-seating`, `pickup-points` and `treks` enabled too
+
+Same shape as `rooming` above — all three are plan-gated capabilities, `GROUP`-only, and step 6's
+capability table predicts every one of them before steps 23-32 run. Against the seeded demo agency this
+repo ships against, all three are already `true` (`GET /api/v1/agencies/{ref}/entitlement` as a console
+admin shows the effective flags); against a different agency, a `402 PLAN_FEATURE_DISABLED` on step 24,
+29 or 31 means one of these three is off, not a bug in this repo.
+
+Step 23 ingests its own second trip — `eventType: TRIP` rather than `TREK` — for the same reason step 12
+ingests its own: the TREK trip from step 12 cannot show a TRIP's hard-block close policy, a fleet with no
+seat-mapped vehicle at all (by step 27 it already has a FLIGHT), or a trek endpoint refusing the wrong
+kind of trip. Three separate facts need a trip that is not a trek, so one fixture carries all three
+rather than three throwaway trips.
+
 ## What each half proves
 
 | | `server/simulate.ts` steps 1-11 | `server/simulate.ts` steps 12-22 | `browser/` |
@@ -170,8 +194,8 @@ tell apart.
 | Runs as | the CRM's own backend | the manager's device, from Node | the manager's browser tab |
 | Entry point | `kaafil-js` | `on-ground/` for the writes, `kaafil-js` for step 22's reads | `kaafil-js/client` + `on-ground/` |
 | Credential | the partner API key, from `KAAFIL_API_KEY` | the manager session minted in step 8 — **an API-key write here is a `401` by design** | the same manager session, pasted in by hand, rotating itself from then on |
-| Resource groups available | all of them: `auth`, `shareTokens`, `trips`, `vendors`, `journey`, `webhooks`, `events` | the itinerary and rooming endpoints | `journey` and `vendors` — every other SDK group needs an API key a browser never has |
-| What it demonstrates | the full CRM-side lifecycle, plus the four typed-error lessons below | that the product is usable, not just that the endpoints answer: see the table below | that the credential boundary is structural (`client.journey` throws `KaafilClientNotOpenError` before `open()`), and that the rooming board renders from the server's own canon with no client-side colour maths |
+| Resource groups available | all of them: `auth`, `shareTokens`, `trips`, `vendors`, `journey`, `webhooks`, `events` | the itinerary, rooming, seating, pickup-points and treks endpoints — `itinerary`/`rooming` through `kaafil-js` for step 22's reads, all five through `on-ground/` for every write | `journey` and `vendors` — every other SDK group needs an API key a browser never has |
+| What it demonstrates | the full CRM-side lifecycle, plus the four typed-error lessons below | that the product is usable, not just that the endpoints answer: see the two tables below (steps 12-22, then 23-32) | that the credential boundary is structural (`client.journey` throws `KaafilClientNotOpenError` before `open()`), and that the rooming board renders from the server's own canon with no client-side colour maths |
 
 Together the halves are the argument for shipping two entry points at all: the server half is trusted
 with the agency's credential, the browser half is trusted with nothing longer-lived than one manager's
@@ -198,6 +222,33 @@ in the run; none is printed and left for a reader to believe.
 | 20 | The change log carries the day's edits as **sentences the server rendered**, attributed to a named manager. A client never composes "Moved X to position 2" from a `kind` and a metadata blob. |
 | 21 | Three edits inside one five-second window produce **exactly one** `itinerary.updated` event, counted by distinct `eventId` rather than by delivery record — delivery is at-least-once, so one event retried twice is three records. |
 | 22 | The CRM reads the finished day back through `kaafil.itinerary.read`, `kaafil.rooming.read` and `kaafil.itinerary.changeLog.list` on its **own API key** — that half of the surface genuinely is SDK-native. Then the same client tries `kaafil.itinerary.items.add` and is refused with `UnsatisfiableSchemeError` **before any request is built**: the credential boundary is a fact the SDK reads out of the vendored spec, not a `401` you discover in staging. |
+
+## The rest of the boarding day — what each of steps 23-32 proves
+
+Phase 10B's three modules: vehicles and seats, pickup stops and their close policies, and a trek's
+postpone. Same discipline as the table above — each row is a claim the run asserts, not a call that
+merely returned `200`.
+
+| Step | The claim |
+|---|---|
+| 23 | A second trip is ingested with `eventType: TRIP` rather than `TREK` — the fixture the rest of this block needs for the facts a trek trip cannot show: a hard-block close, a fleet with no seat-mapped vehicle at all, and a trek endpoint's refusal on the wrong kind of trip. |
+| 24 | A `BUS` is created with **no** seat layout and stays that way; the SAME request with `layout: 'TWO_TWO'` on a `BUS` is **refused `422`** — a road vehicle carries no seat grid, "the label grid was a fiction the manager maintained and the driver ignored" (FRD §4.0). A `FLIGHT` with the identical layout succeeds and synthesises its 8-seat grid — the type, not a knob, decides. |
+| 25 | A traveller assigned to the seat-less bus comes back `seatLabel: null`, and that is not a gap — it is the correct, complete state of a place on a vehicle with no grid. "On Bus 2" is a complete answer. |
+| 26 | On the flight, one traveller is assigned a seat immediately (`seatLabel: '1A'`); a second is assigned with `seatLabel` **omitted** and comes back `seatLabel: null` too — "seat pending", legal, and not an error to repair. The board's `seatPendingCount` counts it. |
+| 27 | `auto-assign` with `dryRun: true` then `dryRun: false` return **byte-identical** `plan`/`perRule`/`unassigned`/`deltas` — the same property step 18 proves for rooming, holding here because `dryRun` never reaches `solve()` either. With a seat-mapped `FLIGHT` already in the fleet, `medicalFirst` and `gender` report `applied`, **never `noop`** — step 28 is the fleet where they do. |
+| 28 | A fleet with **only** a seat-less bus reports `medicalFirst` and `gender` as `noop`, reason `no_seat_map` — "there is no front row to place them in" is the honest answer on a road-only trip, which is most trips. `noop` is a different fact from a rule that was simply left out of `strategyOrder`: every rule reports something, always. |
+| 29 | Pickups, **TRIP policy**: closing a stop with a `PENDING` traveller is refused `422 STOP_HAS_PENDING` with `requiresConfirm: false` — `confirm` has no effect on this `eventType` at all. Resolving the last traveller and closing again succeeds. |
+| 30 | Pickups, **TREK policy**: the SAME code, `STOP_HAS_PENDING`, refuses a short close but with `requiresConfirm: true` — the field a client reads to decide "show the confirm sheet" versus "show the per-traveller resolver". Closing again with `confirm: true` and `confirmedHeadCount` succeeds, and the still-`PENDING` traveller **auto-resolves to `NO_SHOW`** — "a manager on a trailhead can't wait forever." |
+| 31 | Postponing the trek (resolved through the `'active'` sentinel, never falling through to a literal external id) shifts every `ItineraryDay.isoDate` by the ripple's own `dayDelta`, and moves the stay window forward with it. The pickup stop's `scheduledTime` is asserted **unchanged** — an explicit non-action, not an omission: stop times are re-confirmed by a manager, because they usually change with the new departure. |
+| 32 | Calling a trek endpoint against the `eventType: TRIP` trip from step 23 answers `422 NOT_A_TREK` — a real, named code, not `BUSINESS_RULE_VIOLATION` with a `details.rule` string to switch on. The same call against the real trek (via `'active'`) succeeds, so the refusal is provably about the trip's kind, not about the endpoint being broken. |
+
+Steps 24-32 go through `on-ground/`, not `kaafil-js`, for a different reason than steps 13-21: this SDK
+had no `seating`/`pickups`/`treks` resource groups at all at the time this repo was extended for Phase
+10B (a sibling agent's work for that wave had not landed — see
+[What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do)). Step 32's error is
+therefore caught as `on-ground/`'s one `OnGroundHttpError.code`, not a `kaafil-js` typed class — the same
+honest gap `on-ground/client.ts`'s own header names for itinerary/rooming, one level earlier in the SDK's
+rollout.
 
 ### The `?since=` cursor is the one thing to get right
 
@@ -302,6 +353,29 @@ each other on purpose:
 in order from most specific to a generic transport fallback, so no branch in that page ever has to say
 just "something went wrong."
 
+### Module-local error codes: one name per refusal, not a shared code plus a string to switch on
+
+Phase 10B's engine shipped a mechanism for a module to register its OWN error codes — `NOT_A_TREK`,
+`SEATING_CAPACITY_ORPHAN`, `CANNOT_POSTPONE` — each with one HTTP status, published into the SAME
+`ErrorCode` enum every cross-cutting code lives in (deliberately not a second enum: a consumer receives
+one code string on the wire and cannot know which enum to look in). Step 32 catches `NOT_A_TREK` and
+names why it matters: the alternative would be `422 BUSINESS_RULE_VIOLATION` with `details.rule ===
+'not_a_trek'`, which is what this exact refusal *used* to look like before the mechanism existed, and
+what it would still look like without it. A shared code plus a details string means every caller who
+wants to branch on this specific refusal has to know the string, spell it exactly, and hope no other
+refusal starts reusing the same shared code with a different string in `details.rule`. A real, named code
+is a compile-time fact for anyone generating types off the contract, and a `catch` clause anyone can grep
+for.
+
+**This step demonstrates the mechanism at the wire level, not yet through a `kaafil-js` typed class.** At
+the time this repo was extended for Phase 10B, `kaafil-js`'s generated `ERROR_CODE_TABLE` did not carry
+`NOT_A_TREK` (or `SEATING_CAPACITY_ORPHAN` / `CANNOT_POSTPONE`) — the SDK had not yet re-vendored the
+10B contract. So step 32 reads `err.code` off `on-ground/`'s `OnGroundHttpError` directly, the same way
+steps 29-30 read `STOP_HAS_PENDING`. The day `kaafil-js` vendors this contract, step 32 becomes a typed
+`catch` reading `err.code === 'NOT_A_TREK'` off a real class, exactly like step 10's four lessons already
+do for the cross-cutting catalog — what changes is which object carries `.code`, not what the assertion
+proves.
+
 ### The on-ground half has exactly one error class, and that is the argument for the SDK
 
 `on-ground/client.ts` throws a single `OnGroundHttpError` carrying the status, the engine's `code` and
@@ -309,8 +383,9 @@ just "something went wrong."
 `isRetryable()` answer, no `err.fields`, no `ERROR_CODE_TABLE` lookup — the steps that use it branch on
 **string equality against `err.code`**, which is precisely the hand-maintained table `kaafil-js` exists to
 delete. It is in the repo at full visibility rather than hidden behind a similar-looking message, because
-the gap *is* the reason the SDK's error model is worth having. It goes away when `kaafil.itinerary` and
-`client.rooming` do.
+the gap *is* the reason the SDK's error model is worth having. It goes away, group by group, as
+`client.itinerary`/`client.rooming` land on the API-key client's write path and as `kaafil-js` grows
+`seating`/`pickups`/`treks` resource groups of its own.
 
 ### The chips are the smallest good example of a boundary
 
@@ -342,6 +417,17 @@ Two details that are load-bearing rather than decorative:
   rather than migrated** the day `client.itinerary` / `client.rooming` exist, because a local copy of a
   server's response shape that outlives its reason is exactly the drift the SDK exists to prevent. Read it
   as a measurement of what the SDK gives you, not as a pattern to copy.
+- **Steps 24-32 (seating, pickup-points, treks) go through `on-ground/` for a plainer reason: `kaafil-js`
+  has no resource groups for these three modules at all, on either client.** At the time this repo was
+  extended for Phase 10B, a sibling agent's SDK work for `seating`/`pickups`/`treks` had not landed — no
+  `src/resources/seating.ts` and no `NOT_A_TREK`/`SEATING_CAPACITY_ORPHAN`/`CANNOT_POSTPONE` in the
+  generated `ERROR_CODE_TABLE`. This repo's brief is explicit that a step should build against the raw
+  endpoints and say so plainly when the SDK groups it needs are not importable, rather than block on them
+  or fake typed calls — `on-ground/client.ts` and `on-ground/types.ts` grew three more sections instead.
+  Everything said above about the itinerary/rooming stand-in — one error class, no retry ladder, no token
+  rotation, hand-restated response shapes, deleted rather than migrated — applies to these three sections
+  identically, and for the same reason: `kaafil-js` growing `seating`/`pickups`/`treks` groups (with or
+  without a `client.*` write path) makes this code obsolete, not wrong.
 - **No partner-console flow.** The console is Kaafil's own control plane for minting keys, managing
   entitlements and registering webhook endpoints — not part of an integration. This repo receives
   `KAAFIL_API_KEY` from the environment, the same way a real integrator does after collecting a key once,
@@ -395,6 +481,39 @@ expect to find here:
 - **`COORDINATOR` read-only** (`422 READ_ONLY_ROLE`), and the `422 CAPABILITY_UNAVAILABLE` a
   `PERSONALIZED` trip answers for rooming. Both need a second manager or a second trip whose only purpose
   is a refusal.
+- **Vehicle PATCH/DELETE and `SEATING_CAPACITY_ORPHAN`.** The walkthrough only creates vehicles and
+  assigns seats; it never edits or deletes one, so none of §4.5's three orphan-guard forms (a capacity-down
+  or layout swap on a seat-mapped vehicle, `layout → null` with a recorded seat still on it, a
+  capacity-down on a seat-less vehicle) is exercised, and neither is a vehicle delete clearing its
+  occupants to the pool.
+- **A seat swap.** Step 26 only ever assigns an EMPTY seat. Dropping a mover onto an occupied target seat
+  atomically swaps the two travellers (`displacedTravellerId`/`displacedSeatLabel` in the response) — the
+  seating equivalent of rooming's own swap, and untouched here.
+- **The manager-vehicle link** (`POST`/`DELETE …/seating/vehicles/:vehicleId/manager`), including the
+  atomic demotion when a manager already linked to one vehicle is linked to another.
+- **`reassignAll` on seating's auto-assign.** Every manual assignment in this walkthrough is a fresh
+  placement (step 25-26); nothing here shows `auto-assign` moving a `MANUAL`-pinned traveller, which is
+  exactly what `reassignAll: true` is for and `false` (the default) refuses to do.
+- **Stop PATCH/DELETE, reorder, and a `kind` flip while assignments exist** (`422
+  BUSINESS_RULE_VIOLATION` with `details.assignedCount`) — pickup-points' own CRUD and reorder surface,
+  untouched by steps 29-30.
+- **`headCountMismatch: true`.** Both close demos supply a `confirmedHeadCount` that matches the system
+  count, so the flag-not-block behaviour (§4.4: "allowed but flagged" on a mismatch) is described in this
+  README but never provoked.
+- **Reopen, and a corrective re-close with `reopened: true`.** Neither pickup-points' `reopen` nor the
+  fresh, corrective `pickup.stop_closed` a next close would emit after one is called here.
+- **`manifest-by-pickup`**, the boarding screen that groups every stop with its travellers and the
+  unassigned bucket — read, but not exercised by any step.
+- **Walk-ins** (`POST /treks/:trekRef/walk-ins` and its `/meta` read) — the Kaafil-minted traveller, the
+  closed-stop auto-reopen, and the `trek.walkin_added` + `pickup.boarded` cross-emit are all real and none
+  is shown here. This walkthrough's brief named the postpone ripple and the error model as the two things
+  a trek demo had to prove; walk-ins are a real gap on top of that, not an oversight.
+- **A `?since=` delta over the seating board or the pickups list.** Both accept the cursor (`vehicles`
+  and the stop array respectively narrow to it); neither is exercised here the way step 17 exercises the
+  itinerary's.
+- **The `423 LOCKED` a close-out lock would answer on any of the ten writes across these three modules** —
+  same gap the rooming/itinerary section above names, for the same reason: the lock is mounted as a
+  pass-through, so there is nothing live to provoke it against.
 
 ## Licence
 

@@ -60,7 +60,7 @@ import {
 // It is deleted, not migrated, the day `client.itinerary`/`client.rooming` exist.
 import { occupantChip, parseToneToken } from '../on-ground/chip';
 import { createOnGroundClient, OnGroundHttpError } from '../on-ground/client';
-import type { ItineraryItem, ItineraryRead, Occupant, Room } from '../on-ground/types';
+import type { ItineraryItem, ItineraryRead, Occupant, Room, Vehicle } from '../on-ground/types';
 import { isTombstone } from '../on-ground/types';
 
 // ---------------------------------------------------------------------------
@@ -1474,11 +1474,630 @@ async function main(): Promise<void> {
     });
     passed++;
 
+    // ===================================================================
+    // Steps 23-32 — the rest of the boarding day: seating, pickup stops and
+    // a trek's postpone ripple (Phase 10B).
+    //
+    // `kaafil-js` does not yet expose `seating`/`pickups`/`treks` resource
+    // groups — a sibling agent's SDK work for this wave had not landed at the
+    // time this file was written (no `src/resources/seating.ts`, and
+    // `ERROR_CODE_TABLE` still lacks `NOT_A_TREK`/`SEATING_CAPACITY_ORPHAN`/
+    // `CANNOT_POSTPONE`). So these steps go through `on-ground/`, exactly as
+    // steps 13-21 do for itinerary/rooming, and `on-ground/client.ts` grew
+    // three more typed groups rather than a second stand-in pattern. This is
+    // stated once here, plainly, rather than re-argued at every step below.
+    // ===================================================================
+
     // -------------------------------------------------------------------
-    // Step 23 — close and summarize.
+    // Step 23 — a second trip, eventType TRIP, for the contrasts a TREK trip
+    // cannot show: the hard-block close policy, a road-only fleet with no
+    // seat-mapped vehicle anywhere, and a trek endpoint's refusal on the
+    // wrong kind of trip. Reusing `onGroundTripRef` for these would prove
+    // nothing — it is already a TREK, and by the time step 27 runs it already
+    // has a seat-mapped FLIGHT in its fleet.
     // -------------------------------------------------------------------
 
-    await step(23, 'close() the client', async () => {
+    const altExternalTripId = `sim-alt-${runSuffix}`;
+
+    const altTripRef = await step(
+      23,
+      'ingest a second GROUP trip, eventType TRIP — the contrast fixture for steps 28-32',
+      async () => {
+        const upsert = await kaafil.trips.upsert({
+          externalTripId: altExternalTripId,
+          externalAgencyId: agencyRef,
+          code: `SIM-ALT-${runSuffix}`,
+          name: 'Simulated Fixed-Manifest Departure',
+          tripMode: TripMode.Group,
+          eventType: EventType.Trip,
+          startDate: new Date(Date.now() - day),
+          endDate: new Date(Date.now() + 2 * day),
+          sourceUpdatedAt: new Date(),
+        });
+
+        const now = new Date();
+        const roster: ManifestTraveller[] = [
+          {
+            externalTravellerId: `sim-alt-p-${runSuffix}`,
+            fullName: 'Priya Kapoor',
+            gender: Gender.Female,
+            bookingStatus: BookingStatus.Confirmed,
+            sourceUpdatedAt: now,
+          },
+          {
+            externalTravellerId: `sim-alt-q-${runSuffix}`,
+            fullName: 'Qadir Sheikh',
+            gender: Gender.Male,
+            bookingStatus: BookingStatus.Confirmed,
+            sourceUpdatedAt: now,
+          },
+          {
+            externalTravellerId: `sim-alt-r-${runSuffix}`,
+            fullName: 'Ritu Bose',
+            gender: Gender.Female,
+            bookingStatus: BookingStatus.Confirmed,
+            sourceUpdatedAt: now,
+          },
+        ];
+        const manifest = await kaafil.trips.travellers.pushManifest({
+          tripRef: upsert.tripId,
+          mode: ManifestMode.Merge,
+          travellers: roster,
+        });
+        assertEquals(manifest.manifestCount, roster.length, 'the alt-trip manifest was short');
+
+        await kaafil.trips.managers.assign({
+          tripRef: upsert.tripId,
+          managerRef,
+          isLead: true,
+          role: ManagerRole.Manager,
+          sourceUpdatedAt: new Date(),
+        });
+
+        console.log(`  tripId=${upsert.tripId} eventType=TRIP roster=${manifest.manifestCount}`);
+        return upsert.tripId;
+      },
+    );
+    passed++;
+
+    /** Name → travellerId, read off whichever roll-up already carries both —
+     * cheaper than a second manifest read, and every roster below has
+     * distinct full names. */
+    function travellerIdByName(
+      rows: readonly { travellerId: string; fullName: string }[],
+      fullName: string,
+      label: string,
+    ): string {
+      const found = rows.find((row) => row.fullName === fullName);
+      if (found === undefined) {
+        throw new AssertionFailure(`${label}: no traveller named "${fullName}" in this roll-up`);
+      }
+      return found.travellerId;
+    }
+
+    // -------------------------------------------------------------------
+    // Step 24 — build the fleet. §4.0 rule 1: a `layout` is legal ONLY on
+    // FLIGHT/TRAIN. A BUS gets no grid at all — "the label grid was a
+    // fiction the manager maintained and the driver ignored" — enforced
+    // twice: here in the service (`422 VALIDATION_ERROR`) and by
+    // `Vehicle_layout_requires_seatable_type` underneath it for any write
+    // path that forgets this one.
+    // -------------------------------------------------------------------
+
+    const fleet = await step(
+      24,
+      'seating: a BUS with no layout, a BUS refused a layout, and a FLIGHT with one',
+      async () => {
+        const bus = await onGround.seating.createVehicle({
+          tripRef: onGroundTripRef,
+          regNo: `HP-BUS-${runSuffix}`,
+          type: 'BUS',
+          capacity: 40,
+        });
+        assertEquals(bus.data.layout, null, 'the bus was created with a layout');
+        assertEquals(bus.data.seatMapped, false, 'a layout-less bus reported seatMapped');
+        console.log(`  BUS ${bus.data.regNo} — seatMapped=false, capacity=${String(bus.data.capacity)}`);
+
+        try {
+          await onGround.seating.createVehicle({
+            tripRef: onGroundTripRef,
+            regNo: `HP-BUS-REFUSED-${runSuffix}`,
+            type: 'BUS',
+            capacity: 40,
+            layout: 'TWO_TWO',
+          });
+          throw new AssertionFailure('a BUS was allowed to carry a seat layout');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) throw err;
+          assertEquals(err.status, 422, 'a road vehicle with a layout should be a 422');
+          assertEquals(err.code, 'VALIDATION_ERROR', 'the refusal should be a validation error');
+          console.log(
+            '  BUS + layout → 422 VALIDATION_ERROR — a road vehicle carries no seat grid: ' +
+              'nobody on the ground enforces one, so the label grid would be a fiction the ' +
+              'manager maintained and the driver ignored',
+          );
+        }
+
+        const flight = await onGround.seating.createVehicle({
+          tripRef: onGroundTripRef,
+          regNo: `6E-${runSuffix}`,
+          type: 'FLIGHT',
+          capacity: 8,
+          layout: 'TWO_TWO',
+        });
+        assertEquals(flight.data.seatMapped, true, 'a FLIGHT with a layout did not report seatMapped');
+        assertTrue(flight.data.seats.length === 8, 'the flight did not synthesise 8 seats from (TWO_TWO, 8)');
+        console.log(`  FLIGHT ${flight.data.regNo} — seatMapped=true, seats=${flight.data.seats.map((s) => s.seatLabel).join(',')}`);
+
+        return { busId: bus.data.id, flightId: flight.data.id };
+      },
+    );
+    passed++;
+
+    const seatingRoster = await onGround.seating.board({ tripRef: onGroundTripRef });
+    const seatingRosterRows = seatingRoster.data.unassignedPool;
+
+    // -------------------------------------------------------------------
+    // Step 25 — assign a traveller to the seat-less bus. The whole answer is
+    // WHICH VEHICLE — `seatLabel: null` is not a gap to fill in, it is the
+    // correct and complete state of a place on a vehicle with no grid.
+    // "On Bus 2" is a complete answer.
+    // -------------------------------------------------------------------
+
+    await step(25, 'seating: assign a traveller to the seat-less bus — seatLabel stays null', async () => {
+      const priya = travellerIdByName(seatingRosterRows, 'Asha Rao', 'step 25');
+      const result = await onGround.seating.assign({
+        tripRef: onGroundTripRef,
+        travellerId: priya,
+        vehicleId: fleet.busId,
+      });
+      assertEquals(result.data.vehicleId, fleet.busId, 'the traveller did not land on the bus');
+      assertEquals(result.data.seatLabel, null, 'a seat-less vehicle produced a non-null seatLabel');
+      console.log(`  Asha Rao → ${result.data.vehicleId} (bus), seatLabel=null — "on Bus 2" is a complete answer`);
+    });
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 26 — assign on the flight: one traveller WITH a seat, one WITHOUT.
+    // Both are legal. `seatLabel` omitted means "don't touch the seat" — a
+    // first assignment lands with no seat and that is not an error to
+    // repair; "the group is confirmed on the 06:40 flight days before the
+    // airline issues seat numbers" (FRD §4.2).
+    // -------------------------------------------------------------------
+
+    await step(
+      26,
+      'seating: assign on the FLIGHT — one seat immediately, one "seat pending" and equally legal',
+      async () => {
+        const kabir = travellerIdByName(seatingRosterRows, 'Kabir Rao', 'step 26');
+        const seated = await onGround.seating.assign({
+          tripRef: onGroundTripRef,
+          travellerId: kabir,
+          vehicleId: fleet.flightId,
+          seatLabel: '1A',
+        });
+        assertEquals(seated.data.seatLabel, '1A', 'the flight assignment did not carry the requested seat');
+        console.log(`  Kabir Rao → flight, seatLabel=1A`);
+
+        const meera = travellerIdByName(seatingRosterRows, 'Meera Singh', 'step 26');
+        const pending = await onGround.seating.assign({
+          tripRef: onGroundTripRef,
+          travellerId: meera,
+          vehicleId: fleet.flightId,
+          // `seatLabel` omitted entirely — not `null` — "don't touch the seat".
+        });
+        assertEquals(pending.data.vehicleId, fleet.flightId, 'the pending traveller did not land on the flight');
+        assertEquals(pending.data.seatLabel, null, 'a first assignment with no seatLabel produced one anyway');
+        console.log('  Meera Singh → flight, seatLabel=null — "seat pending", not an error to repair');
+
+        const board = await onGround.seating.board({ tripRef: onGroundTripRef });
+        assertTrue(board.data.summary.seatPendingCount >= 1, 'the board did not count the seat-pending traveller');
+        console.log(`  board.summary.seatPendingCount=${String(board.data.summary.seatPendingCount)}`);
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 27 — auto-assign the rest of the fleet: dryRun then apply, and
+    // the two plans are BYTE-IDENTICAL — the property the whole solver
+    // design exists to make testable, because `dryRun` never reaches
+    // `solve()` at all. `genderAdjacency: 'AVOID_UNRELATED'` is passed
+    // explicitly so `gender`'s verdict is a real one (the Kaafil default is
+    // `OFF`, under which `gender` always reports `applied` regardless of the
+    // fleet — that would prove nothing about `noop`). With a seat-mapped
+    // FLIGHT already in this fleet, `medicalFirst` and `gender` must NOT
+    // report `noop` here — step 28 is the fleet where they do.
+    // -------------------------------------------------------------------
+
+    const seatingApplied = await step(
+      27,
+      'seating: auto-assign dryRun then apply — byte-identical, and no noop while a FLIGHT exists',
+      async () => {
+        const rules = { genderAdjacency: 'AVOID_UNRELATED' as const };
+        const preview = await onGround.seating.autoAssign({
+          tripRef: onGroundTripRef,
+          dryRun: true,
+          rules,
+        });
+        assertEquals(preview.data.dryRun, true, 'the preview did not report itself as a dry run');
+        assertTrue(preview.data.plan.length > 0, 'the preview planned nobody');
+
+        const between = await onGround.seating.board({ tripRef: onGroundTripRef });
+        const busBefore = (between.data.vehicles.filter(
+          (row): row is Vehicle => !isTombstone(row),
+        ) as Vehicle[]).find((v) => v.id === fleet.busId);
+        assertEquals(busBefore?.occupants.length, 1, 'the dry run wrote to the board (bus occupant count moved)');
+
+        const apply = await onGround.seating.autoAssign({
+          tripRef: onGroundTripRef,
+          dryRun: false,
+          rules,
+        });
+        assertEquals(apply.data.dryRun, false, 'the apply reported itself as a dry run');
+
+        assertJsonEquals(apply.data.plan, preview.data.plan, 'the applied seating plan differs from the preview');
+        assertJsonEquals(apply.data.perRule, preview.data.perRule, 'the applied perRule differs from the preview');
+        assertJsonEquals(
+          apply.data.unassigned,
+          preview.data.unassigned,
+          'the applied unassigned list differs from the preview',
+        );
+        assertJsonEquals(apply.data.deltas, preview.data.deltas, 'the applied deltas differ from the preview');
+
+        console.log(`  plan: ${String(apply.data.plan.length)} placement(s)`);
+        for (const rule of apply.data.perRule) {
+          console.log(`    ${rule.rule.padEnd(13)} ${rule.outcome.padEnd(8)} ${rule.reason}`);
+          if (rule.rule === 'medicalFirst' || rule.rule === 'gender') {
+            assertTrue(
+              rule.outcome !== 'noop',
+              `${rule.rule} reported noop on a fleet that has a seat-mapped FLIGHT`,
+            );
+          }
+        }
+        console.log('  dryRun:true and dryRun:false returned byte-identical plan/perRule/unassigned/deltas');
+        return apply.data;
+      },
+    );
+    passed++;
+    void seatingApplied;
+
+    // -------------------------------------------------------------------
+    // Step 28 — a road-only fleet: `medicalFirst` and `gender` are BOTH
+    // `noop`, reason `no_seat_map`. "There is no front row to place them in"
+    // (FRD §4.6) — on a road-only trip, which is most trips, that is the
+    // honest answer rather than a comfort claimed. `noop` is a different
+    // fact from a rule that was simply left out of `strategyOrder`: every
+    // rule reports something, always.
+    // -------------------------------------------------------------------
+
+    await step(
+      28,
+      'seating: a road-only fleet reports noop/no_seat_map for medicalFirst and gender',
+      async () => {
+        const roadBus = await onGround.seating.createVehicle({
+          tripRef: altTripRef,
+          regNo: `DL-BUS-${runSuffix}`,
+          type: 'BUS',
+          capacity: 20,
+        });
+        assertEquals(roadBus.data.seatMapped, false, 'the road-only fixture bus unexpectedly carries a grid');
+
+        const preview = await onGround.seating.autoAssign({
+          tripRef: altTripRef,
+          dryRun: true,
+          rules: { genderAdjacency: 'AVOID_UNRELATED' },
+        });
+
+        const byRule = new Map(preview.data.perRule.map((r) => [r.rule, r] as const));
+        const medical = byRule.get('medicalFirst');
+        const gender = byRule.get('gender');
+        assertEquals(medical?.outcome, 'noop', 'medicalFirst did not report noop on a road-only fleet');
+        assertEquals(medical?.noopReason, 'no_seat_map', 'medicalFirst noop carried the wrong reason');
+        assertEquals(gender?.outcome, 'noop', 'gender did not report noop on a road-only fleet');
+        assertEquals(gender?.noopReason, 'no_seat_map', 'gender noop carried the wrong reason');
+
+        console.log(`  medicalFirst → noop (${String(medical?.noopReason)}): ${medical?.reason}`);
+        console.log(`  gender       → noop (${String(gender?.noopReason)}): ${gender?.reason}`);
+      },
+    );
+    passed++;
+
+    const altRoster = (await onGround.seating.board({ tripRef: altTripRef })).data.unassignedPool;
+
+    // -------------------------------------------------------------------
+    // Step 29 — pickups, TRIP policy: a hard block. Every PENDING traveller
+    // at the stop must appear in `resolutions[]` with a terminal status, or
+    // the close is refused outright — `confirm` has no effect here at all.
+    // "A scheduled departure with a fixed manifest can — and must — account
+    // for everyone before the bus moves."
+    // -------------------------------------------------------------------
+
+    await step(
+      29,
+      'pickups: TRIP policy — close refuses a PENDING traveller, then succeeds once resolved',
+      async () => {
+        const stop = await onGround.pickups.createStop({
+          tripRef: altTripRef,
+          name: 'Connaught Place',
+          scheduledTime: new Date(Date.now() + 30 * 60_000).toISOString(),
+        });
+
+        const priya = travellerIdByName(altRoster, 'Priya Kapoor', 'step 29');
+        const qadir = travellerIdByName(altRoster, 'Qadir Sheikh', 'step 29');
+        const ritu = travellerIdByName(altRoster, 'Ritu Bose', 'step 29');
+
+        for (const travellerId of [priya, qadir, ritu]) {
+          await onGround.pickups.assignTraveller({ tripRef: altTripRef, pointId: stop.data.id, travellerId });
+        }
+        await onGround.pickups.boardTraveller({
+          tripRef: altTripRef,
+          pointId: stop.data.id,
+          travellerId: priya,
+          status: 'BOARDED',
+        });
+        await onGround.pickups.boardTraveller({
+          tripRef: altTripRef,
+          pointId: stop.data.id,
+          travellerId: qadir,
+          status: 'BOARDED',
+        });
+        // ritu stays PENDING.
+
+        try {
+          await onGround.pickups.closeStop({ tripRef: altTripRef, pointId: stop.data.id });
+          throw new AssertionFailure('a TRIP-policy close succeeded with a PENDING traveller left');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) throw err;
+          assertEquals(err.status, 422, 'a TRIP close with a PENDING traveller should be a 422');
+          assertEquals(err.code, 'STOP_HAS_PENDING', 'the refusal should be STOP_HAS_PENDING');
+          assertEquals(
+            err.details?.['requiresConfirm'],
+            false,
+            'a TRIP-policy refusal must not offer requiresConfirm — there is no confirm sheet on this eventType',
+          );
+          console.log(
+            `  close refused: 422 STOP_HAS_PENDING, requiresConfirm=false — TRIP's hard block, not TREK's confirm sheet`,
+          );
+        }
+
+        const closed = await onGround.pickups.closeStop({
+          tripRef: altTripRef,
+          pointId: stop.data.id,
+          resolutions: [{ travellerId: ritu, status: 'NO_SHOW' }],
+        });
+        assertEquals(closed.data.stop.status, 'CLOSED', 'the stop did not close once every PENDING was resolved');
+        assertEquals(closed.data.boardedCount, 2, 'the closed stop reported the wrong boarded count');
+        assertEquals(closed.data.noShowCount, 1, 'the closed stop reported the wrong no-show count');
+        console.log('  close succeeded once every traveller was resolved: 2 BOARDED, 1 NO_SHOW');
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 30 — pickups, TREK policy: close with confirmation. A short close
+    // (boarded < expected) is refused WITHOUT `confirm`, and the response
+    // names WHY with `requiresConfirm: true` — the SAME code as step 29's
+    // hard block, discriminated by this field rather than a second code
+    // (RULES §5). WITH `confirm` + `confirmedHeadCount`, the close succeeds
+    // and every still-PENDING traveller auto-resolves to NO_SHOW: "a manager
+    // on a trailhead can't wait forever."
+    // -------------------------------------------------------------------
+
+    await step(
+      30,
+      'pickups: TREK policy — a short close needs confirm, then auto-resolves the remainder to NO_SHOW',
+      async () => {
+        const stop = await onGround.pickups.createStop({
+          tripRef: onGroundTripRef,
+          name: 'Trailhead Camp',
+          scheduledTime: new Date(Date.now() + 45 * 60_000).toISOString(),
+        });
+
+        const devi = travellerIdByName(seatingRosterRows, 'Devi Patel', 'step 30');
+        const farhan = travellerIdByName(seatingRosterRows, 'Farhan Ali', 'step 30');
+        const gopal = travellerIdByName(seatingRosterRows, 'Gopal Rao', 'step 30');
+
+        for (const travellerId of [devi, farhan, gopal]) {
+          await onGround.pickups.assignTraveller({ tripRef: onGroundTripRef, pointId: stop.data.id, travellerId });
+        }
+        await onGround.pickups.boardTraveller({
+          tripRef: onGroundTripRef,
+          pointId: stop.data.id,
+          travellerId: devi,
+          status: 'BOARDED',
+        });
+        await onGround.pickups.boardTraveller({
+          tripRef: onGroundTripRef,
+          pointId: stop.data.id,
+          travellerId: farhan,
+          status: 'BOARDED',
+        });
+        // gopal stays PENDING — 2 boarded of 3 expected: a short close.
+
+        try {
+          await onGround.pickups.closeStop({ tripRef: onGroundTripRef, pointId: stop.data.id });
+          throw new AssertionFailure('a short TREK close succeeded without confirm');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) throw err;
+          assertEquals(err.status, 422, 'a short TREK close without confirm should be a 422');
+          assertEquals(err.code, 'STOP_HAS_PENDING', 'the refusal should be the SAME code as the TRIP policy');
+          assertEquals(
+            err.details?.['requiresConfirm'],
+            true,
+            'a short TREK close must say requiresConfirm:true — the confirm-sheet discriminator',
+          );
+          console.log('  close refused: 422 STOP_HAS_PENDING, requiresConfirm=true — show the confirm sheet');
+        }
+
+        const closed = await onGround.pickups.closeStop({
+          tripRef: onGroundTripRef,
+          pointId: stop.data.id,
+          confirm: true,
+          confirmedHeadCount: 2,
+        });
+        assertEquals(closed.data.stop.status, 'CLOSED', 'the confirmed short close did not close the stop');
+        assertEquals(closed.data.boardedCount, 2, 'the confirmed close reported the wrong boarded count');
+        assertEquals(
+          closed.data.noShowCount,
+          1,
+          'the still-PENDING traveller did not auto-resolve to NO_SHOW on confirm',
+        );
+        assertEquals(closed.data.headCountMismatch, false, 'a matching confirmedHeadCount was flagged as a mismatch');
+        console.log('  close succeeded WITH confirm: 2 BOARDED, 1 auto-resolved NO_SHOW');
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 31 — postpone the trek, and assert the ripple. `ItineraryDay`s and
+    // the stay window move; pickup `scheduledTime` does NOT — stop times are
+    // re-confirmed by the manager because they usually change with the new
+    // departure. That non-action needs its own assertion, not just an
+    // omission a reader has to take on faith. `trekRef: 'active'` resolves
+    // through the manager's own current assignment — never falling through
+    // to an external id that happens to equal the literal string.
+    // -------------------------------------------------------------------
+
+    await step(
+      31,
+      "postpone the trek via the 'active' sentinel — itinerary and stay windows shift, pickup times do not",
+      async () => {
+        const beforeItinerary = await onGround.itinerary.read({ tripRef: onGroundTripRef });
+        const beforeWindows = await onGround.rooming.listStayWindows({ tripRef: onGroundTripRef });
+        const beforePickups = await onGround.pickups.listStops({ tripRef: onGroundTripRef });
+
+        const oldStart = Date.parse(beforeItinerary.data.trip.startDate);
+        const newStart = new Date(oldStart + 3 * day);
+        const newEnd = new Date(Date.parse(beforeItinerary.data.trip.endDate) + 3 * day);
+
+        const result = await onGround.treks.postpone({
+          trekRef: 'active',
+          newStartDate: newStart.toISOString(),
+          newEndDate: newEnd.toISOString(),
+          reason: 'Landslide warning on the approach road',
+        });
+        assertEquals(result.data.status, 'POSTPONED', 'the trip did not report POSTPONED after the postpone');
+        assertTrue(result.data.ripple.dayDelta > 0, 'the ripple reported no forward day delta');
+        assertTrue(result.data.ripple.itineraryDaysShifted > 0, 'no itinerary day was reported shifted');
+        assertTrue(result.data.ripple.stayWindowsShifted > 0, 'no stay window was reported shifted');
+        console.log(
+          `  postponed: dayDelta=${String(result.data.ripple.dayDelta)} ` +
+            `daysShifted=${String(result.data.ripple.itineraryDaysShifted)} ` +
+            `itemsShifted=${String(result.data.ripple.itineraryItemsShifted)} ` +
+            `stayWindowsShifted=${String(result.data.ripple.stayWindowsShifted)}`,
+        );
+
+        const afterItinerary = await onGround.itinerary.read({ tripRef: onGroundTripRef });
+        assertEquals(
+          afterItinerary.data.days.length,
+          beforeItinerary.data.days.length,
+          'the day count changed across a postpone — a shift must move days, not add or drop them',
+        );
+        beforeItinerary.data.days.forEach((beforeDay, index) => {
+          const afterDay = afterItinerary.data.days[index];
+          if (afterDay === undefined) {
+            throw new AssertionFailure(`step 31: day ${String(index)} is missing after the postpone`);
+          }
+          assertEquals(
+            Date.parse(afterDay.isoDate) - Date.parse(beforeDay.isoDate),
+            result.data.ripple.dayDelta * day,
+            `day ${String(index)}'s isoDate did not shift by the ripple's own dayDelta`,
+          );
+        });
+
+        const afterWindows = await onGround.rooming.listStayWindows({ tripRef: onGroundTripRef });
+        assertEquals(afterWindows.data.length, beforeWindows.data.length, 'a stay window appeared or vanished');
+        const beforeWindow = beforeWindows.data[0];
+        const afterWindow = afterWindows.data[0];
+        if (beforeWindow === undefined || afterWindow === undefined) {
+          throw new AssertionFailure('step 31: unreachable — the stay window from step 18 is gone');
+        }
+        assertTrue(
+          Date.parse(afterWindow.startDate) > Date.parse(beforeWindow.startDate),
+          'the stay window did not move forward with the trek',
+        );
+        console.log(
+          `  stay window "${afterWindow.label}": ${beforeWindow.startDate} → ${afterWindow.startDate}`,
+        );
+
+        // The explicit non-action: pickup scheduledTime is untouched. This is
+        // asserted, not merely left unmentioned — an omission and a fact
+        // read the same on a diff, and only one of them is safe to rely on.
+        const afterPickups = await onGround.pickups.listStops({ tripRef: onGroundTripRef });
+        assertEquals(afterPickups.data.length, beforePickups.data.length, 'a pickup stop appeared or vanished');
+        for (const before of beforePickups.data) {
+          const after = afterPickups.data.find((row) => row.id === before.id);
+          if (after === undefined) {
+            throw new AssertionFailure(`step 31: pickup stop ${before.id} is missing after the postpone`);
+          }
+          assertEquals(
+            after.scheduledTime,
+            before.scheduledTime,
+            `pickup stop "${before.name}"'s scheduledTime moved — it must be re-confirmed by a manager, never shifted by the ripple`,
+          );
+        }
+        console.log(
+          `  ${String(afterPickups.data.length)} pickup stop(s): scheduledTime unchanged on every one — ` +
+            're-confirmed by a manager, not carried by the ripple',
+        );
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 32 — the error model's payoff: a module-local code, not a generic
+    // 422. Calling a trek endpoint against the TRIP-eventType trip from step
+    // 23 answers `422 NOT_A_TREK` — wrong KIND, never confused with missing
+    // (that stays `404`, unknown or cross-scope alike).
+    //
+    // This goes through `on-ground/`'s raw error surface (`err.code`), not a
+    // `kaafil-js` typed class, for the reason stated at the top of this
+    // block: the SDK has no `treks` group yet, and its generated
+    // `ERROR_CODE_TABLE` does not carry `NOT_A_TREK` at the time this file
+    // was written. What this step proves is the WIRE-LEVEL fact the module-
+    // local error-code mechanism bought a consumer — a real, named code
+    // rather than `BUSINESS_RULE_VIOLATION` with a `details.rule` string to
+    // switch on. The moment `kaafil-js` vendors the 10B contract, this
+    // becomes `catch (err) { if (err instanceof KaafilBusinessRuleError...) }`
+    // reading `err.code === 'NOT_A_TREK'` off a typed class, same as step 10's
+    // demonstrations already do for the cross-cutting catalog.
+    // -------------------------------------------------------------------
+
+    await step(
+      32,
+      'treks: a wrong-KIND trip answers 422 NOT_A_TREK, not a generic 422 with a details string',
+      async () => {
+        try {
+          await onGround.treks.board({ trekRef: altExternalTripId });
+          throw new AssertionFailure('a treks endpoint answered for an eventType=TRIP trip');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) throw err;
+          assertEquals(err.status, 422, 'a treks call on a TRIP trip should be a 422');
+          assertEquals(err.code, 'NOT_A_TREK', 'the refusal should carry the module-local NOT_A_TREK code');
+          assertTrue(
+            err.code !== 'BUSINESS_RULE_VIOLATION' && err.code !== 'VALIDATION_ERROR',
+            'NOT_A_TREK must be its own code, not a generic 422 wearing a details string',
+          );
+          console.log(
+            `  treks.board on a TRIP trip → 422 ${String(err.code)} — a real, named code a caller ` +
+              'branches on directly, not BUSINESS_RULE_VIOLATION + details.rule',
+          );
+        }
+
+        // The positive control: the SAME endpoint on the real trek succeeds.
+        const board = await onGround.treks.board({ trekRef: 'active' });
+        assertEquals(board.data.emptyState, null, 'the manager\'s active trek board reported emptyState');
+        assertTrue(board.data.externalTripId !== null, 'the active trek board resolved to no trip');
+        console.log(`  treks.board({trekRef:'active'}) on the real trek → phase=${String(board.data.phase)}`);
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 33 — close and summarize.
+    // -------------------------------------------------------------------
+
+    await step(33, 'close() the client', async () => {
       kaafil.close(); // synchronous — no in-flight request survives it
     });
     passed++;

@@ -49,10 +49,23 @@ import type {
   ChangeLogEntry,
   ItineraryRead,
   OnGroundResponse,
+  PickupAssignResult,
+  PickupBoardResult,
+  PickupCloseResult,
+  PickupKind,
+  PickupStop,
+  PostponeResult,
   ReorderResult,
   Room,
   RoomingBoard,
+  SeatingAssignResult,
+  SeatingAutoAssignResult,
+  SeatingBoard,
   StayWindow,
+  TrekBoard,
+  Vehicle,
+  VehicleLayout,
+  VehicleType,
 } from './types';
 
 /**
@@ -161,6 +174,81 @@ export interface OnGroundClient {
       dryRun: boolean;
     }): Promise<OnGroundResponse<AutoAssignResult>>;
   };
+  /**
+   * Added for the 10B boarding-day walkthrough. See `./types.ts`'s header on
+   * why these three groups live here rather than on `kaafil-js` — the SDK has
+   * no `seating`/`pickups`/`treks` resource group yet.
+   */
+  readonly seating: {
+    board(args: { tripRef: string; since?: string }): Promise<OnGroundResponse<SeatingBoard>>;
+    createVehicle(args: {
+      tripRef: string;
+      regNo: string;
+      type?: VehicleType;
+      capacity: number;
+      layout?: VehicleLayout | null;
+    }): Promise<OnGroundResponse<Vehicle>>;
+    /** `seatLabel` omitted = "don't touch the seat"; explicit `null` = "clear
+     * it" — the two spellings are NOT the same key shape, so this method
+     * threads the distinction through rather than defaulting one to the other. */
+    assign(
+      args: { tripRef: string; travellerId: string; vehicleId: string | null } & (
+        | { seatLabel?: never }
+        | { seatLabel: string | null }
+      ),
+    ): Promise<OnGroundResponse<SeatingAssignResult>>;
+    autoAssign(args: {
+      tripRef: string;
+      dryRun: boolean;
+      reassignAll?: boolean;
+      rules?: {
+        strategyOrder?: readonly string[];
+        genderAdjacency?: 'OFF' | 'AVOID_UNRELATED' | 'STRICT_ROWS';
+        fillOrder?: 'BALANCED' | 'FILL_FIRST' | 'BY_STOP';
+      };
+    }): Promise<OnGroundResponse<SeatingAutoAssignResult>>;
+  };
+  readonly pickups: {
+    listStops(args: {
+      tripRef: string;
+      kind?: PickupKind;
+      since?: string;
+    }): Promise<OnGroundResponse<readonly PickupStop[]>>;
+    createStop(args: {
+      tripRef: string;
+      kind?: PickupKind;
+      name: string;
+      scheduledTime: string;
+      sortOrder?: number;
+    }): Promise<OnGroundResponse<PickupStop>>;
+    assignTraveller(args: {
+      tripRef: string;
+      pointId: string;
+      travellerId: string;
+    }): Promise<OnGroundResponse<PickupAssignResult>>;
+    boardTraveller(args: {
+      tripRef: string;
+      pointId: string;
+      travellerId: string;
+      status: 'BOARDED' | 'NO_SHOW';
+    }): Promise<OnGroundResponse<PickupBoardResult>>;
+    closeStop(args: {
+      tripRef: string;
+      pointId: string;
+      resolutions?: readonly { travellerId: string; status: 'BOARDED' | 'NO_SHOW' }[];
+      confirm?: boolean;
+      confirmedHeadCount?: number;
+    }): Promise<OnGroundResponse<PickupCloseResult>>;
+  };
+  readonly treks: {
+    board(args: { trekRef: string }): Promise<OnGroundResponse<TrekBoard>>;
+    postpone(args: {
+      trekRef: string;
+      newStartDate: string;
+      newEndDate: string;
+      reason: string;
+    }): Promise<OnGroundResponse<PostponeResult>>;
+  };
   /** The raw call, for the probes that must send something the typed methods
    * above deliberately cannot express — a client-supplied `sortOrder`, a
    * `status: 'LIVE'`. Both are refusals worth demonstrating, and a typed
@@ -236,6 +324,12 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
     `/api/v1/trips/${encodeURIComponent(tripRef)}/itinerary${suffix}`;
   const roomingPath = (tripRef: string, suffix = ''): string =>
     `/api/v1/trips/${encodeURIComponent(tripRef)}/rooming${suffix}`;
+  const seatingPath = (tripRef: string, suffix = ''): string =>
+    `/api/v1/trips/${encodeURIComponent(tripRef)}/seating${suffix}`;
+  const pickupsPath = (tripRef: string, suffix = ''): string =>
+    `/api/v1/trips/${encodeURIComponent(tripRef)}/pickups${suffix}`;
+  const treksPath = (trekRef: string, suffix = ''): string =>
+    `/api/v1/treks/${encodeURIComponent(trekRef)}${suffix}`;
 
   return {
     itinerary: {
@@ -324,6 +418,117 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
           method: 'POST',
           path: roomingPath(tripRef, '/auto-assign'),
           body: { stayWindowId, dryRun },
+        });
+      },
+    },
+    seating: {
+      async board({ tripRef, since }) {
+        return request<SeatingBoard>({
+          method: 'GET',
+          path: seatingPath(tripRef),
+          query: { since },
+        });
+      },
+      async createVehicle({ tripRef, regNo, type, capacity, layout }) {
+        return request<Vehicle>({
+          method: 'POST',
+          path: seatingPath(tripRef, '/vehicles'),
+          body: {
+            regNo,
+            capacity,
+            ...(type !== undefined ? { type } : {}),
+            ...(layout !== undefined ? { layout } : {}),
+          },
+        });
+      },
+      async assign(args) {
+        const body: Record<string, unknown> = {
+          travellerId: args.travellerId,
+          vehicleId: args.vehicleId,
+        };
+        // `seatLabel` present in `args` at all (even as `null`) is the
+        // "clear it" spelling; absent is "don't touch the seat" — spreading
+        // conditionally on the KEY'S presence, not its value, is what keeps
+        // that distinction alive through this wrapper.
+        if ('seatLabel' in args) {
+          body['seatLabel'] = args.seatLabel;
+        }
+        return request<SeatingAssignResult>({
+          method: 'POST',
+          path: seatingPath(args.tripRef, '/assign'),
+          body,
+        });
+      },
+      async autoAssign({ tripRef, dryRun, reassignAll, rules }) {
+        return request<SeatingAutoAssignResult>({
+          method: 'POST',
+          path: seatingPath(tripRef, '/auto-assign'),
+          body: {
+            dryRun,
+            ...(reassignAll !== undefined ? { reassignAll } : {}),
+            ...(rules !== undefined ? { rules } : {}),
+          },
+        });
+      },
+    },
+    pickups: {
+      async listStops({ tripRef, kind, since }) {
+        return request<readonly PickupStop[]>({
+          method: 'GET',
+          path: pickupsPath(tripRef),
+          query: { kind, since },
+        });
+      },
+      async createStop({ tripRef, kind, name, scheduledTime, sortOrder }) {
+        return request<PickupStop>({
+          method: 'POST',
+          path: pickupsPath(tripRef),
+          body: {
+            ...(kind !== undefined ? { kind } : {}),
+            name,
+            scheduledTime,
+            ...(sortOrder !== undefined ? { sortOrder } : {}),
+          },
+        });
+      },
+      async assignTraveller({ tripRef, pointId, travellerId }) {
+        return request<PickupAssignResult>({
+          method: 'POST',
+          path: pickupsPath(tripRef, `/${encodeURIComponent(pointId)}/assign`),
+          body: { travellerId },
+        });
+      },
+      async boardTraveller({ tripRef, pointId, travellerId, status }) {
+        return request<PickupBoardResult>({
+          method: 'POST',
+          path: pickupsPath(tripRef, `/${encodeURIComponent(pointId)}/board`),
+          body: { travellerId, status },
+        });
+      },
+      async closeStop({ tripRef, pointId, resolutions, confirm, confirmedHeadCount }) {
+        return request<PickupCloseResult>({
+          method: 'POST',
+          path: pickupsPath(tripRef, `/${encodeURIComponent(pointId)}/close`),
+          body: {
+            ...(resolutions !== undefined ? { resolutions } : {}),
+            ...(confirm !== undefined ? { confirm } : {}),
+            ...(confirmedHeadCount !== undefined ? { confirmedHeadCount } : {}),
+          },
+        });
+      },
+    },
+    treks: {
+      async board({ trekRef }) {
+        return request<TrekBoard>({
+          method: 'GET',
+          path: treksPath(trekRef, '/board'),
+        });
+      },
+      async postpone({ trekRef, newStartDate, newEndDate, reason }) {
+        return request<PostponeResult>({
+          method: 'POST',
+          path: treksPath(trekRef, '/postpone'),
+          body: { newStartDate, newEndDate, reason },
         });
       },
     },
