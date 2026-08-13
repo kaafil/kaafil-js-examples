@@ -266,3 +266,240 @@ export interface AutoAssignResult {
   readonly unassigned: readonly UnassignedEntry[];
   readonly deltas: { readonly assigned: number; readonly movedFromPrevious: number };
 }
+
+// ── transport-seating (10B) ──────────────────────────────────────────────────
+//
+// Added for Phase 10B's boarding-day walkthrough. `kaafil-js` does not yet
+// carry a `seating` resource group at the time this file was written — a
+// sibling agent's SDK groups for `seating`/`pickups`/`treks` had not landed
+// (no `src/resources/seating.ts`, no `NOT_A_TREK`/`SEATING_CAPACITY_ORPHAN` in
+// the generated `ERROR_CODE_TABLE`) — so these three sections extend the SAME
+// stand-in `on-ground/` already uses for itinerary/rooming, rather than
+// invent a second pattern. Same fate as the rest of this file: deleted, not
+// migrated, the day `client.seating`/`client.pickups`/`client.treks` exist.
+
+export type VehicleType = 'BUS' | 'TEMPO_TRAVELLER' | 'CAR' | 'FLIGHT' | 'TRAIN' | 'OTHER';
+export type VehicleLayout = 'TWO_TWO' | 'TWO_ONE' | 'FLAT';
+
+/**
+ * One occupant chip on the seating chart — the same `glyph`/`tone` mark as
+ * rooming's `Occupant` (IMPORTED server-side from rooming's own canon, never
+ * re-derived), plus `pickupStopId` and `assignSource`, which rooming's chip
+ * has no use for.
+ */
+export interface SeatingOccupant {
+  readonly travellerId: string;
+  readonly externalTravellerId: string | null;
+  readonly fullName: string;
+  readonly glyph: string;
+  readonly tone: string;
+  readonly gender: Gender | null;
+  readonly medicalFlag: boolean;
+  readonly partyId: string | null;
+  readonly pickupStopId: string | null;
+  readonly assignSource: 'MANUAL' | 'AUTO' | null;
+}
+
+export interface SeatingSeat {
+  readonly seatLabel: string;
+  readonly rowIndex: number;
+  readonly side: 'left' | 'right' | 'single';
+  readonly isWindow: boolean;
+  readonly isAisle: boolean;
+  readonly occupant: SeatingOccupant | null;
+  readonly assignmentId: string | null;
+  readonly assignmentVersion: number | null;
+}
+
+/**
+ * One vehicle. `seatMapped` is published rather than left for a client to
+ * derive from `layout !== null` — a boolean the engine already computed. The
+ * `seats`/`unseatedOnVehicle` pair and the `occupants` array are mutually
+ * exclusive by `seatMapped`, and BOTH are always present (never omitted) —
+ * branch on `seatMapped`, never on array length.
+ */
+export interface Vehicle {
+  readonly id: string;
+  readonly regNo: string;
+  readonly label: string | null;
+  readonly type: VehicleType;
+  readonly capacity: number;
+  readonly layout: VehicleLayout | null;
+  readonly seatMapped: boolean;
+  readonly managerRef: string | null;
+  readonly managerId: string | null;
+  readonly seats: readonly SeatingSeat[];
+  readonly unseatedOnVehicle: readonly SeatingOccupant[];
+  readonly occupants: readonly SeatingOccupant[];
+  readonly fillCount: number;
+  readonly version: number;
+  readonly updatedAt: string;
+}
+
+export interface SeatingBoard {
+  readonly externalTripId: string;
+  readonly vehicles: readonly DeltaRow<Vehicle>[];
+  readonly unassignedPool: readonly SeatingOccupant[];
+  readonly summary: {
+    readonly onVehicleCount: number;
+    readonly unassignedCount: number;
+    readonly seatPendingCount: number;
+    readonly capacityTotal: number;
+    readonly firstWarnVehicleId: string | null;
+  };
+}
+
+/**
+ * `droppedSeatLabel` is non-null ONLY on a move from a seat-mapped vehicle to
+ * a seat-less one, where the target has no grid to hold the label that was
+ * recorded on the source — a silently discarded boarding-pass seat is a bug
+ * the manager must see.
+ */
+export interface SeatingAssignResult {
+  readonly travellerId: string;
+  readonly vehicleId: string | null;
+  readonly seatLabel: string | null;
+  readonly droppedSeatLabel: string | null;
+  readonly displacedTravellerId: string | null;
+  readonly displacedVehicleId: string | null;
+  readonly displacedSeatLabel: string | null;
+  readonly vehicles: readonly Vehicle[];
+}
+
+export type SeatingNoopReason = 'no_seat_map';
+
+/**
+ * Total over the effective rule order, with a THIRD outcome rooming's
+ * `PerRuleEntry` has no use for: `noop`, for `medicalFirst`/`gender` on a
+ * fleet with no seat-mapped vehicle at all — a heuristic that could not apply
+ * is a different fact from one that was never run.
+ */
+export interface SeatingPerRuleEntry {
+  readonly rule: string;
+  readonly outcome: 'applied' | 'relaxed' | 'noop';
+  readonly reason: string;
+  readonly noopReason: SeatingNoopReason | null;
+}
+
+export interface SeatingUnassignedEntry {
+  readonly travellerId: string;
+  readonly reason: 'no_vehicles' | 'no_spare_capacity' | 'party_split_exhausted';
+}
+
+export interface SeatingAutoAssignResult {
+  readonly dryRun: boolean;
+  readonly plan: readonly { travellerId: string; vehicleId: string; seatLabel: string | null }[];
+  readonly perRule: readonly SeatingPerRuleEntry[];
+  readonly unassigned: readonly SeatingUnassignedEntry[];
+  readonly deltas: { readonly assigned: number; readonly seated: number; readonly movedFromPrevious: number };
+}
+
+// ── pickup-points (10B) ───────────────────────────────────────────────────────
+
+export type PickupKind = 'PICKUP' | 'DROP';
+export type PickupStopStatus = 'OPEN' | 'CLOSED';
+export type PickupRollup = 'not_started' | 'in_progress' | 'ready_to_close' | 'closed';
+export type BoardStatus = 'PENDING' | 'BOARDED' | 'NO_SHOW';
+
+/** One pickup/drop stop, with its live head-count and rollup — computed on
+ * read, never stored. */
+export interface PickupStop {
+  readonly id: string;
+  readonly kind: PickupKind;
+  readonly name: string;
+  readonly locationLabel: string | null;
+  readonly lat: number | null;
+  readonly lng: number | null;
+  /** An instant. NOT shifted by a trek postpone — see step 31. */
+  readonly scheduledTime: string;
+  readonly sortOrder: number;
+  readonly status: PickupStopStatus;
+  readonly closedAt: string | null;
+  readonly closedByManagerId: string | null;
+  readonly rollup: PickupRollup;
+  readonly boardedCount: number;
+  readonly expectedCount: number;
+  readonly version: number;
+  readonly updatedAt: string;
+}
+
+export interface PickupAssignResult {
+  readonly travellerId: string;
+  readonly pickupPointId: string;
+  readonly moved: boolean;
+  readonly previousPickupPointId: string | null;
+  readonly stop: PickupStop;
+}
+
+export interface PickupBoardResult {
+  readonly travellerId: string;
+  readonly pickupPointId: string;
+  readonly status: 'BOARDED' | 'NO_SHOW';
+  readonly boardedAt: string | null;
+  readonly stop: PickupStop;
+}
+
+/**
+ * `requiresConfirm` is the discriminator RULES §5 names — one code
+ * (`STOP_HAS_PENDING`), two policies (TRIP hard-blocks, TREK asks for
+ * confirmation), and this field is how a client tells them apart from the
+ * response alone. `headCountMismatch` is a flag on a SUCCESSFUL close, never
+ * a refusal.
+ */
+export interface PickupCloseResult {
+  readonly stop: PickupStop;
+  readonly boardedCount: number;
+  readonly noShowCount: number;
+  readonly expectedCount: number;
+  readonly confirmedHeadCount: number | null;
+  readonly headCountMismatch: boolean;
+  readonly reopened: boolean;
+}
+
+// ── treks (10B) ───────────────────────────────────────────────────────────────
+
+export type TrekPhase = 'pre_departure' | 'boarding' | 'in_trek' | 'closing';
+
+export interface TrekBoardStop {
+  readonly id: string;
+  readonly kind: PickupKind;
+  readonly name: string;
+  readonly scheduledTime: string;
+  readonly sortOrder: number;
+  readonly status: PickupStopStatus;
+  readonly boardedCount: number;
+  readonly expectedCount: number;
+}
+
+/**
+ * `emptyState` is the ONLY field that varies with "`active` resolved to
+ * nothing" — every other field stays present (`stops: []`, counts at zero)
+ * rather than becoming absent, so a client never guards field PRESENCE, only
+ * `emptyState`'s own nullability.
+ */
+export interface TrekBoard {
+  readonly externalTripId: string | null;
+  readonly phase: TrekPhase | null;
+  readonly stops: readonly TrekBoardStop[];
+  readonly runningHeadCount: { readonly boarded: number; readonly expected: number };
+  readonly emptyState: { readonly reason: 'no_trek_assigned'; readonly message: string } | null;
+}
+
+/** `POST /treks/:trekRef/postpone`'s response — the ripple's own counts, so a
+ * client can confirm what moved without a follow-up itinerary/rooming read. */
+export interface PostponeResult {
+  readonly externalTripId: string;
+  readonly status: 'POSTPONED';
+  readonly postponedFromDate: string;
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly reason: string;
+  readonly rosterCount: number;
+  readonly ripple: {
+    readonly dayDelta: number;
+    readonly itineraryDaysShifted: number;
+    readonly itineraryItemsShifted: number;
+    readonly stayWindowsShifted: number;
+  };
+  readonly version: number;
+}
