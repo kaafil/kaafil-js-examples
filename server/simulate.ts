@@ -2093,11 +2093,390 @@ async function main(): Promise<void> {
     );
     passed++;
 
+    // ===================================================================
+    // Steps 33-40 — the trip checklist (Phase 10C).
+    //
+    // The phase's whole build was one fix: the four reserved sections
+    // (`medical`/`documents`/`logistics`/`handover`) are seeded INSIDE
+    // TRIP-INGEST'S OWN TRANSACTION, not by the first read. Under the
+    // read-time-seed design this replaced, the capability predicate counts
+    // `checklists` rows by `tripId`, so a brand-new trip's aggregate would
+    // read as dark and answer `422 CAPABILITY_UNAVAILABLE` FOREVER — a read
+    // that seeds cannot require what it creates. Step 34 is the assertion
+    // that would have caught it: it reads a trip's checklist the INSTANT
+    // after ingest, before this file has touched it in any way, and the
+    // sections are already there.
+    //
+    // `kaafil-js` now carries a `checklists` resource group — it did not
+    // exist when this file's `on-ground/` sections for seating/pickups/treks
+    // were written, and it landed partway through THIS very phase. But it
+    // lives on the API-KEY client, and every write
+    // (`items.add/patch/remove/toggle`, `templates.pull`) is `managerAuth`
+    // -only — admin template CONFIG (the only thing that could put a WRITE on
+    // the API-key side) does not exist yet either. So there is still no SDK
+    // code path from ANY credential to a checklist write, for the identical
+    // reason itinerary/rooming's writes have none, and steps 33-39 below
+    // extend `on-ground/` for both the writes and (for consistency with
+    // steps 13-21) the reads inside the manager's day. Step 40 is where the
+    // SDK's real, new surface gets exercised: the CRM reads the same trip
+    // back through `kaafil.checklists.read` on its API key, and the identical
+    // write is refused LOCALLY before any request — `UnsatisfiableSchemeError`
+    // — exactly as step 22 already demonstrates for itinerary.
+    // ===================================================================
+
+    /** `checklists.constants.ts#CHECKLIST_RESERVED_SECTION_KEYS`, restated here
+     * because this repo has no import path into the engine — the four keys the
+     * seed writes, in seed order, and the ONLY thing R9's re-seed idempotency
+     * check matches on (never a title). */
+    const CHECKLIST_RESERVED_SECTION_KEYS = ['medical', 'documents', 'logistics', 'handover'] as const;
+
+    const checklistExternalTripId = `sim-checklist-${runSuffix}`;
+
+    const checklistTripRef = await step(
+      33,
+      'ingest a FRESH GROUP trip, dedicated to the checklist walkthrough, and assign the manager',
+      async () => {
+        const upsert = await kaafil.trips.upsert({
+          externalTripId: checklistExternalTripId,
+          externalAgencyId: agencyRef,
+          code: `SIM-CHK-${runSuffix}`,
+          name: 'Simulated Checklist Trip',
+          tripMode: TripMode.Group,
+          eventType: EventType.Trip,
+          startDate: new Date(Date.now() - day),
+          endDate: new Date(Date.now() + 2 * day),
+          sourceUpdatedAt: new Date(),
+        });
+        await kaafil.trips.managers.assign({
+          tripRef: upsert.tripId,
+          managerRef,
+          isLead: true,
+          role: ManagerRole.Manager,
+          sourceUpdatedAt: new Date(),
+        });
+        console.log(`  tripId=${upsert.tripId} — nothing has touched its checklist yet`);
+        return upsert.tripId;
+      },
+    );
+    passed++;
+
     // -------------------------------------------------------------------
-    // Step 33 — close and summarize.
+    // Step 34 — the four sections are ALREADY THERE. Nobody created them,
+    // and this is the FIRST call this file makes against this trip's
+    // checklist at all — there is no earlier read this step's assertion
+    // could be smuggling a seed through.
     // -------------------------------------------------------------------
 
-    await step(33, 'close() the client', async () => {
+    const checklistFirstRead = await step(
+      34,
+      'checklist read on a brand-new trip — the four reserved sections were seeded AT INGEST, not by this read',
+      async () => {
+        const { data } = await onGround.checklists.read({ tripRef: checklistTripRef });
+
+        assertEquals(data.sections.length, 4, 'a freshly-ingested trip did not carry exactly four sections');
+        const keysPresent = new Set(data.sections.map((section) => section.key));
+        for (const reservedKey of CHECKLIST_RESERVED_SECTION_KEYS) {
+          assertTrue(keysPresent.has(reservedKey), `reserved section "${reservedKey}" is missing on a fresh trip`);
+        }
+        // `sourceSectionId: null` on every one — the seed reads a KNOB
+        // (`checklists.seed.sections`), never a template row, so a seeded
+        // section has no origin to record and therefore none is stamped.
+        for (const section of data.sections) {
+          assertEquals(section.sourceSectionId, null, `seeded section "${section.key}" carries a sourceSectionId`);
+        }
+        assertEquals(data.items.length, 0, 'a freshly-seeded checklist already had items');
+        assertEquals(data.progress.total, 0, 'a freshly-seeded checklist already had progress to report');
+        for (const phase of ['PRE_DEPARTURE', 'IN_TRIP', 'POST_TRIP'] as const) {
+          assertEquals(
+            data.hasOpenMandatoryByPhase[phase],
+            false,
+            `a checklist with zero items reported an open mandatory item in ${phase}`,
+          );
+        }
+
+        console.log(
+          `  ${String(data.sections.length)} section(s), seeded at ingest, present before this file ever read them:`,
+        );
+        for (const section of data.sections) {
+          console.log(
+            `    ${section.key.padEnd(10)} phase=${section.phase.padEnd(13)} sourceSectionId=${String(section.sourceSectionId)}`,
+          );
+        }
+        return data;
+      },
+    );
+    passed++;
+
+    const documentsSection = checklistFirstRead.sections.find((section) => section.key === 'documents');
+    if (documentsSection === undefined) {
+      throw new AssertionFailure('step 34 already asserted "documents" exists — this is unreachable');
+    }
+
+    // -------------------------------------------------------------------
+    // Step 35 — add two items into an EXISTING seeded section. The section's
+    // title/audience are untouched (it already existed); the item's `gate`
+    // is derived from the section's `phase` (PRE_DEPARTURE → PRE_TO_ACTIVE)
+    // without this call sending one — the create body has no `gate` field
+    // at all (RULES R2).
+    // -------------------------------------------------------------------
+
+    const checklistItems = await step(
+      35,
+      'add two items into the seeded "documents" section — gate derives from the section\'s own phase',
+      async () => {
+        const passport = await onGround.checklists.items.add({
+          tripRef: checklistTripRef,
+          sectionKey: 'documents',
+          phase: documentsSection.phase,
+          title: 'Passport copy submitted',
+          mandatory: true,
+        });
+        assertEquals(passport.data.gate, 'PRE_TO_ACTIVE', 'a PRE_DEPARTURE section did not derive PRE_TO_ACTIVE');
+        assertEquals(passport.data.sortOrder, 0, 'the first item into an empty section was not at sortOrder 0');
+        assertEquals(passport.data.status, 'OPEN', 'a freshly-added item was not OPEN');
+
+        const insurance = await onGround.checklists.items.add({
+          tripRef: checklistTripRef,
+          sectionKey: 'documents',
+          phase: documentsSection.phase,
+          title: 'Insurance certificate',
+          mandatory: false,
+        });
+        assertEquals(insurance.data.sortOrder, 1, 'the second item did not append at the section\'s tail');
+        assertEquals(insurance.data.sectionId, passport.data.sectionId, 'the two items landed in different sections');
+
+        console.log(
+          `  "${passport.data.title}" (mandatory) → gate=${passport.data.gate} sortOrder=${String(passport.data.sortOrder)}`,
+        );
+        console.log(`  "${insurance.data.title}" → sortOrder=${String(insurance.data.sortOrder)}`);
+        return { passport: passport.data, insurance: insurance.data };
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 36 — toggle concurrency. RULES R4: the guard is on the item's
+    // STATUS, not its `version` — every other write here uses `If-Match`,
+    // this one alone uses `expectedStatus` in the body, and a stale value
+    // is `409 CONFLICT_VERSION` carrying `details.currentStatus` (never
+    // `details.currentVersion` — the version is not what mismatched).
+    // -------------------------------------------------------------------
+
+    const toggledPassport = await step(
+      36,
+      'toggle: a STALE expectedStatus is refused 409 with details.currentStatus, then the correct value succeeds',
+      async () => {
+        try {
+          await onGround.checklists.items.toggle({
+            tripRef: checklistTripRef,
+            itemId: checklistItems.passport.id,
+            // The item is actually OPEN — this claims it is already COMPLETE.
+            expectedStatus: 'COMPLETE',
+          });
+          throw new AssertionFailure('a stale expectedStatus was accepted');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) throw err;
+          assertEquals(err.status, 409, 'a stale expectedStatus should be a 409');
+          assertEquals(err.code, 'CONFLICT_VERSION', 'the refusal should be CONFLICT_VERSION');
+          assertEquals(
+            err.details?.['currentStatus'],
+            'OPEN',
+            'the refusal should carry details.currentStatus, the item\'s ACTUAL state',
+          );
+          console.log(
+            `  toggle(expectedStatus:COMPLETE) on an OPEN item → 409 CONFLICT_VERSION, ` +
+              `details.currentStatus=${JSON.stringify(err.details?.['currentStatus'])}`,
+          );
+        }
+
+        const toggled = await onGround.checklists.items.toggle({
+          tripRef: checklistTripRef,
+          itemId: checklistItems.passport.id,
+          expectedStatus: 'OPEN',
+        });
+        assertEquals(toggled.data.item.status, 'COMPLETE', 'the correct expectedStatus did not flip the item');
+        assertTrue(toggled.data.item.completedByManagerId !== null, 'a completed item carries no completedByManagerId');
+        assertEquals(toggled.data.sectionProgress.complete, 1, 'the section progress did not count the completion');
+        console.log(
+          `  toggle(expectedStatus:OPEN) → COMPLETE; sectionProgress=${JSON.stringify(toggled.data.sectionProgress)}`,
+        );
+        return toggled.data.item;
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 37 — a COMPLETE item cannot be deleted; an OPEN one can (RULES
+    // R6, preserving the audit trail of completed work — un-toggle first).
+    // -------------------------------------------------------------------
+
+    await step(37, 'a COMPLETE item refuses delete; the still-OPEN sibling deletes cleanly', async () => {
+      try {
+        await onGround.checklists.items.remove({
+          tripRef: checklistTripRef,
+          itemId: toggledPassport.id,
+          ifMatch: toggledPassport.version,
+        });
+        throw new AssertionFailure('a COMPLETE item was deleted');
+      } catch (err) {
+        if (!(err instanceof OnGroundHttpError)) throw err;
+        assertEquals(err.status, 422, 'deleting a COMPLETE item should be a 422');
+        assertEquals(err.code, 'BUSINESS_RULE_VIOLATION', 'the refusal should be BUSINESS_RULE_VIOLATION');
+        assertEquals(
+          err.details?.['rule'],
+          'item_complete_delete_blocked',
+          'the refusal should name item_complete_delete_blocked',
+        );
+        console.log('  DELETE on a COMPLETE item → 422 BUSINESS_RULE_VIOLATION (item_complete_delete_blocked)');
+      }
+
+      const deleted = await onGround.checklists.items.remove({
+        tripRef: checklistTripRef,
+        itemId: checklistItems.insurance.id,
+        ifMatch: checklistItems.insurance.version,
+      });
+      assertEquals(deleted.data.deleted, true, 'the still-OPEN item did not delete');
+      console.log(`  DELETE on the still-OPEN "${checklistItems.insurance.title}" → succeeded`);
+    });
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 38 — templates and pull-template. There is no route ANYWHERE in
+    // the current build that creates or edits an agency template
+    // (`checklists.routes.ts`'s own header: "ADMIN TEMPLATE CONFIG IS
+    // DEFERRED, NOT BUILT" — no `checklists.templateManage` flag exists to
+    // gate one even if it were). So a fresh agency's library is genuinely
+    // EMPTY, and this step demonstrates exactly that honest state rather
+    // than fabricate a template through a side channel this repo does not
+    // own. The positive control that IS reachable: `pull-template` against
+    // an id that cannot exist answers the real, gated `404`, proving the
+    // operation is live even though this repo cannot supply it anything to
+    // pull. See the README's "what this repo deliberately does not do" for
+    // why copy-independence (pull, then edit the template, then show the
+    // trip's copy unmoved) is NOT demonstrated here.
+    // -------------------------------------------------------------------
+
+    await step(
+      38,
+      'the agency template library is empty (no admin route creates one yet) — pull-template still refuses correctly',
+      async () => {
+        const templates = await onGround.checklists.templates.list({ tripRef: checklistTripRef });
+        assertEquals(
+          templates.data.templates.length,
+          0,
+          'a fresh agency had a template in its library with no route that could have put one there',
+        );
+        console.log('  checklist.templates.list → 0 templates (no admin route exists to create one — a real gap, see README)');
+
+        try {
+          await onGround.checklists.templates.pull({
+            tripRef: checklistTripRef,
+            templateSectionId: `no-such-template-${runSuffix}`,
+            mode: 'append',
+          });
+          throw new AssertionFailure('pull-template succeeded against an id that cannot exist');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) throw err;
+          assertEquals(err.status, 404, 'pulling a nonexistent template should be a 404');
+          assertEquals(err.code, 'RESOURCE_NOT_FOUND', 'the refusal should be RESOURCE_NOT_FOUND');
+          console.log('  pull-template on a nonexistent id → 404 RESOURCE_NOT_FOUND — the operation is real and gated');
+        }
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 39 — editing an item's `phase` RE-DERIVES its `gate`, unless an
+    // EXPLICIT `gate` is sent in the SAME request (RULES R2). `phase` here
+    // is a hint only — `ChecklistItem` has no `phase` column — so neither
+    // PATCH echoes one back.
+    // -------------------------------------------------------------------
+
+    await step(
+      39,
+      'PATCH phase alone re-derives gate; PATCH phase AND an explicit gate together — the explicit value wins',
+      async () => {
+        const logisticsItem = await onGround.checklists.items.add({
+          tripRef: checklistTripRef,
+          sectionKey: 'logistics',
+          phase: 'IN_TRIP',
+          title: 'Confirm porter headcount',
+        });
+        assertEquals(logisticsItem.data.gate, 'NONE', 'an IN_TRIP section did not derive gate NONE');
+
+        const rederived = await onGround.checklists.items.patch({
+          tripRef: checklistTripRef,
+          itemId: logisticsItem.data.id,
+          ifMatch: logisticsItem.data.version,
+          patch: { phase: 'POST_TRIP' },
+        });
+        assertEquals(
+          rederived.data.gate,
+          'ACTIVE_TO_CLOSED_OUT',
+          'a phase-only PATCH did not re-derive gate from the fixed phase→gate map',
+        );
+        console.log(`  PATCH {phase:POST_TRIP} alone → gate re-derived to ${rederived.data.gate}`);
+
+        const explicitWins = await onGround.checklists.items.patch({
+          tripRef: checklistTripRef,
+          itemId: logisticsItem.data.id,
+          ifMatch: rederived.data.version,
+          patch: { phase: 'IN_TRIP', gate: 'PRE_TO_ACTIVE' },
+        });
+        assertEquals(
+          explicitWins.data.gate,
+          'PRE_TO_ACTIVE',
+          'an EXPLICIT gate in the same request did not win over the phase hint\'s own derivation (which would have been NONE)',
+        );
+        console.log(
+          `  PATCH {phase:IN_TRIP, gate:PRE_TO_ACTIVE} → gate=${explicitWins.data.gate} ` +
+            '(IN_TRIP alone would have derived NONE — the explicit value won)',
+        );
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 40 — back at the CRM: `kaafil.checklists.read` on the API key is
+    // real now, and the identical write is refused LOCALLY — the same shape
+    // step 22 already demonstrates for itinerary/rooming, now true for a
+    // second module.
+    // -------------------------------------------------------------------
+
+    await step(40, 'the CRM reads the checklist back through kaafil.checklists on its own API key', async () => {
+      const read = await kaafil.checklists.read({ tripRef: checklistTripRef });
+      assertEquals(read.sections.length, 4, 'the SDK read a different section count than on-ground did');
+      // A cold read (no `since`) never carries a tombstone — `deltaRead`'s own
+      // cold branch reads the FILTERED client, so `.id` alone is enough here.
+      const sdkItemIds = new Set(read.items.map((row) => row.id));
+      assertTrue(sdkItemIds.has(toggledPassport.id), 'the completed item is missing from the SDK read');
+
+      const templatesViaSdk = await kaafil.checklists.templates.list({ tripRef: checklistTripRef });
+      assertEquals(templatesViaSdk.templates.length, 0, 'the SDK read a template the on-ground client did not see');
+
+      console.log(
+        `  kaafil.checklists.read → ${String(read.sections.length)} sections, ${String(read.items.length)} item row(s)`,
+      );
+
+      try {
+        await kaafil.checklists.items.toggle({
+          tripRef: checklistTripRef,
+          itemId: toggledPassport.id,
+          expectedStatus: 'COMPLETE',
+        });
+        throw new AssertionFailure('an API-key client was allowed to write a checklist toggle');
+      } catch (err) {
+        if (!(err instanceof UnsatisfiableSchemeError)) throw err;
+        console.log(`  kaafil.checklists.items.toggle with an API key → ${err.constructor.name}, offline: ${err.message}`);
+      }
+    });
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 41 — close and summarize.
+    // -------------------------------------------------------------------
+
+    await step(41, 'close() the client', async () => {
       kaafil.close(); // synchronous — no in-flight request survives it
     });
     passed++;
