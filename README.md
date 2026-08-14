@@ -17,7 +17,7 @@ manager session is scoped to one manager and expires in minutes. Splitting them 
 means the browser bundle has no code path that could reach the API-key branch even by accident — it is
 not just a convention, `kaafil-js/client` literally never imports the API-key code.
 
-- `server/simulate.ts` — 33 numbered steps in three parts. Steps 1-11 are the **CRM's side**, run on the
+- `server/simulate.ts` — 41 numbered steps in four parts. Steps 1-11 are the **CRM's side**, run on the
   partner API key: ingest a trip, push a manifest, assign a manager, wait for the journey to build, read
   capabilities and triggers, mint a manager session, and demonstrate the typed errors you actually need
   to branch on. Steps 12-22 are **a manager's working day** on the itinerary and rooming surfaces, run on
@@ -33,16 +33,33 @@ not just a convention, `kaafil-js/client` literally never imports the API-key co
   that is a different fact from an omitted rule, two pickup stops closed under two different policies, a
   trek's postpone rippling into the itinerary and the stay window while pickup times explicitly do not
   move, and a module-local error code (`NOT_A_TREK`) caught and named directly, not read out of a details
-  string. Step 33 closes the client.
+  string. **Steps 33-40 close out Phase 10C: the trip checklist.** A brand-new trip's checklist already
+  carries its four reserved sections the instant after ingest — the phase's central fix, seeding them
+  inside trip-ingest's own transaction rather than on first read, which is what makes the aggregate
+  honestly lit instead of permanently dark on a fresh trip. Two items go into an existing section with
+  their `gate` derived from that section's own `phase`; a toggle's concurrency guard is proved on the
+  item's `status`, not its `version` — a stale value refuses `409` naming the real status, then the
+  correct value succeeds; a `COMPLETE` item refuses deletion while its still-`OPEN` sibling deletes
+  cleanly; the agency's template library is shown genuinely empty (no admin route creates one yet — a
+  real, named gap) with `pull-template`'s own `404` proving the operation is live regardless; and an
+  item's `phase` re-derives its `gate` unless an explicit `gate` rides along in the same request. Step 40
+  closes this block the way step 22 closes the itinerary/rooming one: the CRM reads the same checklist
+  back through `kaafil.checklists`, real on the API-key client now, and the identical write is refused
+  locally before any request. Step 41 closes the client.
 - `browser/` — the manager's-device half. A small static page that opens a session with the token pair
   the server half printed, and loads a journey, its capabilities, and the rooming board with it.
-- `on-ground/` — a small stand-in HTTP client for the itinerary, rooming, seating, pickup-points and
-  treks **writes**, shared by both halves. **It is temporary and it says so.** `kaafil-js` has typed
-  `itinerary`/`rooming` resource groups now, on the API-key client; what it has no path to, from any
-  credential, is a write on either of them. `seating`/`pickups`/`treks` go through `on-ground/` for a
-  second, simpler reason: at the time this repo was extended for Phase 10B, `kaafil-js` had no resource
-  groups for those three modules at all — a sibling agent's SDK work for that wave had not landed (see
-  [What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do)).
+- `on-ground/` — a small stand-in HTTP client for the itinerary, rooming, seating, pickup-points, treks
+  and checklist **writes**, shared by both halves. **It is temporary and it says so.** `kaafil-js` has
+  typed `itinerary`/`rooming`/`checklists` resource groups now, on the API-key client; what it has no
+  path to, from any credential, is a WRITE on any of them — every one of those writes accepts
+  `managerAuth` alone, and `KaafilClient` (the one entry that can hold a manager session) exposes none of
+  the three. `seating`/`pickups`/`treks` go through `on-ground/` for a second, simpler reason on top: at
+  the time this repo was extended for Phase 10B, `kaafil-js` had no resource groups for those three
+  modules at all — a sibling agent's SDK work for that wave had not landed (see
+  [What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do)). `checklists`
+  landed mid-Phase-10C, partway through this repo's own extension for that phase — its READS are
+  genuinely SDK-native now (step 40 proves it), but its writes are on-ground for the same structural
+  reason itinerary/rooming's are.
 
 ## Five-minute start
 
@@ -187,6 +204,15 @@ seat-mapped vehicle at all (by step 27 it already has a FLIGHT), or a trek endpo
 kind of trip. Three separate facts need a trip that is not a trek, so one fixture carries all three
 rather than three throwaway trips.
 
+### Steps 33-40 need `checklists` enabled too, and ingest their own trip for a sharper assertion
+
+Same shape again: `checklists` is a plan-gated, `GROUP`-only capability, and step 6's table predicts it
+(against this repo's seeded demo agency it is already `true`). Step 33 ingests a THIRD trip rather than
+reusing the on-ground trip from step 12 — not because sharing would be wrong, but because step 34's
+claim is sharper against a trip nothing has touched yet: "the four sections were already there" is most
+convincing on a trip whose checklist this file has never read before, rather than one it has already
+been reading and writing to for twenty steps.
+
 ## What each half proves
 
 | | `server/simulate.ts` steps 1-11 | `server/simulate.ts` steps 12-22 | `browser/` |
@@ -194,8 +220,8 @@ rather than three throwaway trips.
 | Runs as | the CRM's own backend | the manager's device, from Node | the manager's browser tab |
 | Entry point | `kaafil-js` | `on-ground/` for the writes, `kaafil-js` for step 22's reads | `kaafil-js/client` + `on-ground/` |
 | Credential | the partner API key, from `KAAFIL_API_KEY` | the manager session minted in step 8 — **an API-key write here is a `401` by design** | the same manager session, pasted in by hand, rotating itself from then on |
-| Resource groups available | all of them: `auth`, `shareTokens`, `trips`, `vendors`, `journey`, `webhooks`, `events` | the itinerary, rooming, seating, pickup-points and treks endpoints — `itinerary`/`rooming` through `kaafil-js` for step 22's reads, all five through `on-ground/` for every write | `journey` and `vendors` — every other SDK group needs an API key a browser never has |
-| What it demonstrates | the full CRM-side lifecycle, plus the four typed-error lessons below | that the product is usable, not just that the endpoints answer: see the two tables below (steps 12-22, then 23-32) | that the credential boundary is structural (`client.journey` throws `KaafilClientNotOpenError` before `open()`), and that the rooming board renders from the server's own canon with no client-side colour maths |
+| Resource groups available | all of them: `auth`, `shareTokens`, `trips`, `vendors`, `journey`, `webhooks`, `events`, `checklists` (reads) | the itinerary, rooming, seating, pickup-points, treks and checklist endpoints — `itinerary`/`rooming`/`checklists` through `kaafil-js` for steps 22/40's reads, all six through `on-ground/` for every write | `journey` and `vendors` — every other SDK group needs an API key a browser never has |
+| What it demonstrates | the full CRM-side lifecycle, plus the four typed-error lessons below | that the product is usable, not just that the endpoints answer: see the three tables below (steps 12-22, 23-32, then 33-40) | that the credential boundary is structural (`client.journey` throws `KaafilClientNotOpenError` before `open()`), and that the rooming board renders from the server's own canon with no client-side colour maths |
 
 Together the halves are the argument for shipping two entry points at all: the server half is trusted
 with the agency's credential, the browser half is trusted with nothing longer-lived than one manager's
@@ -249,6 +275,33 @@ had no `seating`/`pickups`/`treks` resource groups at all at the time this repo 
 therefore caught as `on-ground/`'s one `OnGroundHttpError.code`, not a `kaafil-js` typed class — the same
 honest gap `on-ground/client.ts`'s own header names for itinerary/rooming, one level earlier in the SDK's
 rollout.
+
+## The trip checklist — what each of steps 33-40 proves
+
+Phase 10C's one module. Same discipline as the two tables above: each row is a claim the run asserts, and
+each is chosen because a careless implementation of `checklists` would still pass a naive "does the
+endpoint answer 200" test.
+
+| Step | The claim |
+|---|---|
+| 33 | A third trip is ingested, dedicated to this block. Nothing in this file has read or written its checklist yet by the time step 34 runs — the fixture step 34's own assertion needs to mean what it says. |
+| 34 | The four reserved sections (`medical`/`documents`/`logistics`/`handover`) are **already there**, with `sourceSectionId: null` on every one. This is the phase's whole reason for existing: they are seeded **inside trip-ingest's own transaction**, not by this read. Under the design this replaced — seed-on-first-read — the capability's own data predicate counts `checklists` rows by `tripId`, so a brand-new trip would read as dark and answer `422 CAPABILITY_UNAVAILABLE` **forever**: a read that seeds cannot require what it creates. This step is the assertion that would have caught it, and it is why it runs before this file has made any other call against this trip's checklist. |
+| 35 | Two items are added into the already-existing `documents` section. Neither create body carries a `gate` — it derives from the SECTION's own `phase` (`PRE_DEPARTURE → PRE_TO_ACTIVE`), and the section's title/audience are untouched because the section already existed. |
+| 36 | Toggle's concurrency guard is on the item's **`status`**, not its `version` — the one write in this whole API that departs from `If-Match`. A stale `expectedStatus` is refused `409 CONFLICT_VERSION` carrying `details.currentStatus` (never `details.currentVersion` — the version is not what mismatched), and the client's job is to read that field and retry with the real value, which is exactly what the positive control does next. |
+| 37 | A `COMPLETE` item refuses `DELETE` with `422 BUSINESS_RULE_VIOLATION`, `details.rule: 'item_complete_delete_blocked'` — un-toggle first, preserving the audit trail of completed work. Its still-`OPEN` sibling, added in the same step, deletes cleanly — the negative control alone would prove nothing about *why* the first delete failed without this positive control sitting next to it. |
+| 38 | The agency's template library reads genuinely **empty** — not a bug in this walkthrough, but the honest state of a build with no route anywhere that creates or edits one (`checklists.routes.ts`'s own header: "ADMIN TEMPLATE CONFIG IS DEFERRED, NOT BUILT"). `pull-template` against an id that cannot exist still answers the real, gated `404 RESOURCE_NOT_FOUND` — proof the operation itself is live even though this repo has nothing it can supply it to pull. See [What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do) for why the copy-independence claim (pull a template, edit the template, show the trip's copy unmoved) is **not** demonstrated here, and why that is a real gap rather than an oversight. |
+| 39 | Editing an item's `phase` **re-derives its `gate`** from the fixed phase→gate map, unless an **explicit `gate`** rides in the same request — in which case the explicit value wins outright, even over a `phase` that would otherwise have derived something else. `phase` here is a hint only: `ChecklistItem` carries no `phase` column at all (phase belongs to the section), so neither PATCH echoes one back. |
+| 40 | The CRM reads the same checklist back through `kaafil.checklists.read` and `kaafil.checklists.templates.list`, on its own API key — real SDK calls, not `on-ground/`, because these two reads accept `apiKeyAuth` and the resource group now exists. Then the identical write — `kaafil.checklists.items.toggle` — is refused **locally**, `UnsatisfiableSchemeError`, before any request is built: the same credential-boundary proof step 22 already gives for itinerary, now true for a second module. |
+
+Steps 33-39 go through `on-ground/` for the writes (and, for consistency with steps 13-21, the reads
+inside the block) for a THIRD reason, distinct from both tables above: `kaafil-js` gained a `checklists`
+resource group **partway through this repo's own extension for Phase 10C** — later than steps 1-32 were
+written, earlier than this paragraph was. Its reads (`read`, `templates.list`) accept `apiKeyAuth` and are
+therefore real SDK calls today (step 40 uses them); every write is `managerAuth`-only, and `KaafilClient`
+— the sole entry that can hold a manager session — exposes none of `itinerary`, `rooming` or `checklists`.
+So the write-side gap is structurally identical to itinerary/rooming's, not to seating/pickups/treks'
+(which had no resource group of any kind to reach for). This paragraph, and `on-ground/types.ts`'s own
+header on the checklist section, will be the ones to delete the day that changes.
 
 ### The `?since=` cursor is the one thing to get right
 
@@ -376,6 +429,14 @@ steps 29-30 read `STOP_HAS_PENDING`. The day `kaafil-js` vendors this contract, 
 do for the cross-cutting catalog — what changes is which object carries `.code`, not what the assertion
 proves.
 
+`checklists` (step 37) draws the line the other way on the identical decision, and the contrast is worth
+reading side by side: a `COMPLETE` item refusing `DELETE` stays the shared `422 BUSINESS_RULE_VIOLATION`
+with `details.rule: 'item_complete_delete_blocked'`, never a module-local code. Not because it is less
+real a refusal than `NOT_A_TREK` — because the FRD/RULES pair only ever *describes* this one, and never
+names it as an identity a caller is meant to branch on directly (`checklists.constants.ts`'s own line on
+the point). The mechanism exists; using it is a judgment call about whether a refusal is an *identity* a
+consumer needs to grep for, not a reflex to apply to every 422 a module can produce.
+
 ### The on-ground half has exactly one error class, and that is the argument for the SDK
 
 `on-ground/client.ts` throws a single `OnGroundHttpError` carrying the status, the engine's `code` and
@@ -458,6 +519,21 @@ Two details that are load-bearing rather than decorative:
   version guards, idempotency keys, a retryability table — and nothing above is one. There is no outbox, no
   local store, no replay-on-reconnect. A consumer still has to build that; what this repo shows is that the
   server side of it exists and behaves.
+- **`pull-template`'s copy-independence is described here, not demonstrated.** The FRD's central claim
+  for this operation — pull a template onto a trip, edit the template afterwards, and show the trip's own
+  copy did not move, which is the entire reason `sourceSectionId` exists as provenance rather than a live
+  link — needs an agency template to exist in the first place. **No route anywhere in the current build
+  creates or edits one.** `checklists.routes.ts`'s own header states this plainly: "ADMIN TEMPLATE CONFIG
+  IS DEFERRED, NOT BUILT" — the closed flag catalog carries no `checklists.templateManage` sub-switch, and
+  `Agency.settings` does not exist to host one if it did. So step 38 demonstrates the honest, reachable
+  half instead: the library reads genuinely empty, and `pull-template` against an id that cannot exist
+  still answers a real, gated `404` rather than something that looks like success on nothing. The
+  copy-independence claim itself will need its own step the day an admin route (or a seed fixture this
+  repo is told about) puts a template in the library to pull.
+- **The traveller-facing checklist is not shown here, and it is not this phase's to show.** Everything in
+  steps 33-40 is the MANAGER's board — `ChecklistPhase`-bucketed, internal-audience by default. The
+  traveller's own view (flat, filtered to `audience: EXTERNAL`, reached through a share token rather than a
+  manager session) is Phase 12's, and no route for it exists yet for this repo to call.
 
 ### Still not demonstrated, though the endpoints exist
 
@@ -514,6 +590,28 @@ expect to find here:
 - **The `423 LOCKED` a close-out lock would answer on any of the ten writes across these three modules** —
   same gap the rooming/itinerary section above names, for the same reason: the lock is mounted as a
   pass-through, so there is nothing live to provoke it against.
+- **The `423 LOCKED` on any of `checklists`' own five writes** — the identical gap, one module later:
+  every write in `checklists.routes.ts` declares `closeoutLock: 'ref'`, and none can be provoked into
+  answering it while the lock stays a mounted pass-through.
+- **`checklist.item_completed` and `checklist.completed`, at the receiver.** Step 11's `events.list()`
+  shows both types by name (they fire during steps 35-36, on the API key's own delivery ledger — the same
+  visibility step 21 uses for `itinerary.updated`), but no step here counts a burst of toggles the way
+  step 21 counts a burst of itinerary edits, and neither event is asserted un-coalesced, only that they
+  exist. `checklists.constants.ts`'s own header explains why neither is folded — a toggle is treated like
+  `pickup.stop_closed` (a single, discrete act), not like `pickup.boarded` (a burst worth folding) — but
+  that reasoning is not re-proved here with a receiver-side count.
+- **`COMPLETE → OPEN` un-toggling.** Step 36 only ever toggles OPEN→COMPLETE. Reopening a completed item
+  is legal (RULES R11: it "emits nothing", monotonic-forward for the CRM) but no step here does it, so the
+  emit-nothing half of that rule is described, not exercised.
+- **Item PATCH fields other than the phase→gate pair**: `title`, `subLine`, `isMandatory`, `dayOffset` are
+  all real, independent fields on `PATCH …/checklist/items/:itemId`; step 39 touches only `phase`/`gate`.
+- **`pull-template`'s `replace` mode, and its own R8 guarantee** (wipe `OPEN` items, preserve `COMPLETE`
+  ones) — moot here alongside the copy-independence gap above, since there is no template to pull in
+  either mode.
+- **The console's own checklist read** (`GET /api/v1/console/trips/{ref}/checklist`) — a real, shipped
+  route this phase's other wave added, deliberately excluded from `kaafil-js` on purpose (it authenticates
+  with a console session cookie, never something an integration holds) and therefore out of reach of this
+  repo's SDK-based walkthrough by design, not by gap.
 
 ## Licence
 

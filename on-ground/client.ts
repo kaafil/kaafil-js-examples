@@ -47,6 +47,14 @@
 import type {
   AutoAssignResult,
   ChangeLogEntry,
+  ChecklistAggregate,
+  ChecklistAudience,
+  ChecklistDeleteResult,
+  ChecklistGate,
+  ChecklistItem,
+  ChecklistPhase,
+  ChecklistTemplatesList,
+  ChecklistToggleResult,
   ItineraryRead,
   OnGroundResponse,
   PickupAssignResult,
@@ -249,6 +257,61 @@ export interface OnGroundClient {
       reason: string;
     }): Promise<OnGroundResponse<PostponeResult>>;
   };
+  /**
+   * Added for the Phase 10C checklist walkthrough. `kaafil.checklists` now
+   * exists on the API-key client (`../types.ts`'s new section explains why
+   * that is not the same as a manager-session write path), so ONLY the reads
+   * inside this group are a stand-in for something the SDK could already do
+   * with a different credential; every write here has no SDK path at all yet.
+   */
+  readonly checklists: {
+    read(args: { tripRef: string; since?: string }): Promise<OnGroundResponse<ChecklistAggregate>>;
+    items: {
+      add(args: {
+        tripRef: string;
+        sectionKey: string;
+        sectionTitle?: string;
+        phase: ChecklistPhase;
+        key?: string;
+        title: string;
+        audience?: ChecklistAudience;
+        mandatory?: boolean;
+      }): Promise<OnGroundResponse<ChecklistItem>>;
+      patch(args: {
+        tripRef: string;
+        itemId: string;
+        ifMatch: number;
+        patch: {
+          title?: string;
+          subLine?: string | null;
+          isMandatory?: boolean;
+          gate?: ChecklistGate;
+          dayOffset?: number | null;
+          /** A gate-deriving HINT only — never stored as a column. See `../types.ts`. */
+          phase?: ChecklistPhase;
+        };
+      }): Promise<OnGroundResponse<ChecklistItem>>;
+      remove(args: {
+        tripRef: string;
+        itemId: string;
+        ifMatch: number;
+      }): Promise<OnGroundResponse<ChecklistDeleteResult>>;
+      /** Concurrency guard on `status`, not `version` — see step 36's own comment. */
+      toggle(args: {
+        tripRef: string;
+        itemId: string;
+        expectedStatus: 'OPEN' | 'COMPLETE';
+      }): Promise<OnGroundResponse<ChecklistToggleResult>>;
+    };
+    templates: {
+      list(args: { tripRef: string; locale?: string }): Promise<OnGroundResponse<ChecklistTemplatesList>>;
+      pull(args: {
+        tripRef: string;
+        templateSectionId: string;
+        mode: 'append' | 'replace';
+      }): Promise<OnGroundResponse<ChecklistAggregate>>;
+    };
+  };
   /** The raw call, for the probes that must send something the typed methods
    * above deliberately cannot express — a client-supplied `sortOrder`, a
    * `status: 'LIVE'`. Both are refusals worth demonstrating, and a typed
@@ -330,6 +393,8 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
     `/api/v1/trips/${encodeURIComponent(tripRef)}/pickups${suffix}`;
   const treksPath = (trekRef: string, suffix = ''): string =>
     `/api/v1/treks/${encodeURIComponent(trekRef)}${suffix}`;
+  const checklistPath = (tripRef: string, suffix = ''): string =>
+    `/api/v1/trips/${encodeURIComponent(tripRef)}/checklist${suffix}`;
 
   return {
     itinerary: {
@@ -530,6 +595,70 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
           path: treksPath(trekRef, '/postpone'),
           body: { newStartDate, newEndDate, reason },
         });
+      },
+    },
+    checklists: {
+      async read({ tripRef, since }) {
+        return request<ChecklistAggregate>({
+          method: 'GET',
+          path: checklistPath(tripRef),
+          query: { since },
+        });
+      },
+      items: {
+        async add({ tripRef, sectionKey, sectionTitle, phase, key, title, audience, mandatory }) {
+          return request<ChecklistItem>({
+            method: 'POST',
+            path: checklistPath(tripRef, '/items'),
+            body: {
+              sectionKey,
+              phase,
+              title,
+              ...(sectionTitle !== undefined ? { sectionTitle } : {}),
+              ...(key !== undefined ? { key } : {}),
+              ...(audience !== undefined ? { audience } : {}),
+              ...(mandatory !== undefined ? { mandatory } : {}),
+            },
+          });
+        },
+        async patch({ tripRef, itemId, ifMatch, patch }) {
+          return request<ChecklistItem>({
+            method: 'PATCH',
+            path: checklistPath(tripRef, `/items/${encodeURIComponent(itemId)}`),
+            body: patch,
+            ifMatch,
+          });
+        },
+        async remove({ tripRef, itemId, ifMatch }) {
+          return request<ChecklistDeleteResult>({
+            method: 'DELETE',
+            path: checklistPath(tripRef, `/items/${encodeURIComponent(itemId)}`),
+            ifMatch,
+          });
+        },
+        async toggle({ tripRef, itemId, expectedStatus }) {
+          return request<ChecklistToggleResult>({
+            method: 'POST',
+            path: checklistPath(tripRef, `/items/${encodeURIComponent(itemId)}/toggle`),
+            body: { expectedStatus },
+          });
+        },
+      },
+      templates: {
+        async list({ tripRef, locale }) {
+          return request<ChecklistTemplatesList>({
+            method: 'GET',
+            path: checklistPath(tripRef, '/templates'),
+            query: { locale },
+          });
+        },
+        async pull({ tripRef, templateSectionId, mode }) {
+          return request<ChecklistAggregate>({
+            method: 'POST',
+            path: checklistPath(tripRef, '/pull-template'),
+            body: { templateSectionId, mode },
+          });
+        },
       },
     },
     request,

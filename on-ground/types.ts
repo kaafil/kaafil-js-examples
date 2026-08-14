@@ -503,3 +503,118 @@ export interface PostponeResult {
   };
   readonly version: number;
 }
+
+// ── checklists (10C) ──────────────────────────────────────────────────────────
+//
+// Added for the Phase 10C checklist walkthrough. `kaafil-js` DOES now carry a
+// `checklists` resource group (`src/resources/checklists.ts`) — unlike
+// seating/pickups/treks when THIS file's own header was written, it landed
+// mid-phase. But it lives on the API-KEY client only, and every write
+// (`items.add/patch/remove/toggle`, `templates.pull`) is `managerAuth`-only —
+// there is still no SDK code path from ANY credential to a checklist WRITE,
+// for the identical structural reason itinerary/rooming's writes have none:
+// `KaafilClient`, the one entry that can hold a manager session, does not
+// expose `checklists`. So the manager's-day steps below extend `on-ground/`
+// for the writes (and, for consistency with steps 13-21, the reads inside
+// that day too); a LATER step reads the same trip back through
+// `kaafil.checklists.read` on the API key — proving that half of the SDK
+// surface genuinely is native now — and shows the identical write refused
+// locally, `UnsatisfiableSchemeError`, exactly as step 22 already does for
+// itinerary. This section is deleted, not migrated, the day `client.checklists`
+// (a manager-session-capable one) exists.
+
+export type ChecklistPhase = 'PRE_DEPARTURE' | 'IN_TRIP' | 'POST_TRIP';
+export type ChecklistAudience = 'INTERNAL' | 'EXTERNAL';
+export type ChecklistItemStatus = 'OPEN' | 'COMPLETE';
+export type ChecklistGate = 'NONE' | 'PRE_TO_ACTIVE' | 'ACTIVE_TO_CLOSED_OUT';
+
+export interface ChecklistProgress {
+  readonly total: number;
+  readonly complete: number;
+}
+
+export interface ChecklistItem {
+  readonly id: string;
+  readonly sectionId: string;
+  readonly key: string;
+  readonly title: string;
+  readonly subLine: string | null;
+  readonly status: ChecklistItemStatus;
+  readonly isMandatory: boolean;
+  readonly gate: ChecklistGate;
+  readonly dayOffset: number | null;
+  readonly sortOrder: number;
+  readonly completedByManagerId: string | null;
+  readonly completedAt: string | null;
+  readonly version: number;
+  readonly updatedAt: string;
+}
+
+/**
+ * A trip-owned checklist section. `sourceSectionId` is non-null ONLY on a
+ * section a `pull-template` call created — a seeded section (this file's
+ * whole reason for existing, step 34) always carries `null` here, because
+ * the seed reads a KNOB, not a template row (see the client-side README).
+ */
+export interface ChecklistSection {
+  readonly id: string;
+  readonly key: string;
+  readonly locale: string;
+  readonly title: string;
+  readonly phase: ChecklistPhase;
+  readonly audience: ChecklistAudience;
+  readonly sourceSectionId: string | null;
+  readonly sortOrder: number;
+  readonly version: number;
+  readonly updatedAt: string;
+  readonly progress: ChecklistProgress;
+}
+
+export interface ChecklistTemplateSummary {
+  readonly id: string;
+  readonly key: string;
+  readonly title: string;
+  readonly phase: ChecklistPhase;
+  readonly audience: ChecklistAudience;
+}
+
+export interface ChecklistAggregate {
+  readonly externalTripId: string;
+  readonly title: string;
+  readonly subtitle: string;
+  /** Over the full live set, independent of `?since=`. */
+  readonly progress: ChecklistProgress;
+  readonly hasOpenMandatoryByPhase: Record<ChecklistPhase, boolean>;
+  /** Always the FULL live set — never a delta array; see `items` below for the one that is. */
+  readonly sections: readonly ChecklistSection[];
+  /** The ONLY delta axis. Live rows and tombstones share one array — see `DeltaRow`. */
+  readonly items: readonly DeltaRow<ChecklistItem>[];
+  readonly availableTemplates: readonly ChecklistTemplateSummary[];
+}
+
+export interface ChecklistToggleResult {
+  readonly item: ChecklistItem;
+  readonly sectionProgress: ChecklistProgress;
+  readonly tripProgress: ChecklistProgress;
+}
+
+export interface ChecklistDeleteResult {
+  readonly id: string;
+  readonly deleted: true;
+}
+
+export interface ChecklistTemplateRow {
+  readonly id: string;
+  readonly key: string;
+  readonly locale: string;
+  readonly title: string;
+  readonly phase: ChecklistPhase;
+  readonly audience: ChecklistAudience;
+  readonly itemCount: number;
+  /** `null` until this template is pulled onto some trip, or the pull marker expired. */
+  readonly lastUsedAt: string | null;
+}
+
+export interface ChecklistTemplatesList {
+  readonly templates: readonly ChecklistTemplateRow[];
+}
