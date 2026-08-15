@@ -17,13 +17,11 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test browser/src/dc/*.test.ts",
     "build": "tsc --noEmit && vite build browser",
-    "link:local": "scripts/use-local-sdk.sh",
     "extract:design": "node scripts/extract-design.mjs"
   },
   "comment:play": "`play` runs backend/server.ts and vite browser concurrently in one process group with a trap so Ctrl-C stops both — a tiny bash one-liner, deliberately not a new npm-run-all-style dependency. Two terminals (`pnpm run backend` in one, `pnpm run dev` in the other) works exactly as well and is the more debuggable option — see backend/README.md.",
-  "comment:kaafil-js": "kaafil-js is not published to npm yet, so this resolves the SDK from a sibling checkout. On publish day this becomes a version range (\"^0.1.0\") and nothing else in the repo changes.",
   "dependencies": {
-    "kaafil-js": "link:../kaafil-js",
+    "kaafil-js": "0.1.0-beta.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "shiki": "^4.4.3"

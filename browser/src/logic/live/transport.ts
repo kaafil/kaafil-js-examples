@@ -228,8 +228,8 @@ export interface MintSessionInput {
 
 /** The live session this file holds: the manager token pair AND the real
  * engine base URL `backend/server.ts`'s `/session` route resolved it
- * against (`KAAFIL_BASE_URL`, or its own environment default) — never a
- * hardcoded constant here. See `engineUrl()` below. */
+ * against (`kaafil-js`'s own `resolveBaseUrl`, the one real engine host) —
+ * never a hardcoded constant here. See `engineUrl()` below. */
 export interface LiveSession {
   readonly tripRef: string;
   readonly managerRef: string;

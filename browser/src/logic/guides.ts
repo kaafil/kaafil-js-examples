@@ -92,8 +92,7 @@ export const guides = (c: any): Record<string, any[][]> => ({
     ['h', 'SDK ergonomics — not product gaps, but worth knowing before you build against this'],
     ['tbl', ['WHAT', 'WHAT TO DO INSTEAD'], [
       ['No HMAC signature-verification helper', 'Nothing in kaafil-js hashes or checks X-Kaafil-Signature. Hand-roll HMAC-SHA256 over ${eventId}.${unixSeconds}.${rawBody}, or adopt a generic Standard-Webhooks library.'],
-      ['kaafil-js is not published to npm', 'npm view kaafil-js 404s against the real registry; this repo depends on it via a link:../kaafil-js sibling checkout. Clone kaafil-js alongside your own project and npm link it (or build dist/ and copy the output by hand) — not viable for a real external team outside this monorepo.'],
-      ['Compiled-in default base URLs are placeholders', 'config.ts’s api.kaafil.com / api.test.kaafil.com don’t match the one real documented host. Always pass baseUrl explicitly at construction — omitting it fails silently against a domain that doesn’t exist.']
+      ['npm’s dist-tag wrinkle', 'kaafil-js’s first publish (0.1.0-beta.0) permanently claimed the latest tag; beta has since moved to 0.1.0-beta.1 but latest is still stuck on 0.1.0-beta.0. A bare npm install kaafil-js currently installs the OLDER version. Pin the exact version until a stable release moves latest forward.']
     ]],
     ['h', 'Deferred on purpose — do not wait for these'],
     ['p', 'A UI kit. Non-India regions and multi-currency. Any pre-trip or sales feature (leads, quotes, invoices) — the CRM keeps those. Fine-grained API key scopes. Thumbnails and virus scanning on files. Rooming’s sameBus heuristic and per-segment seating charts. Free-form journey trigger authoring, beyond curated templates. Automated retention sweeps, though the policy and API ship.']
