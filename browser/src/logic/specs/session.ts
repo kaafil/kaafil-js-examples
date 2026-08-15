@@ -104,8 +104,8 @@ export const sessionSpecs = (c: any) => ({
   },
   'session.rotate': {
     lane: 'D',
-    note: 'The SDK exchanges the refresh token itself — pre-emptively and on a 401. This button only forces what it already does. The session itself needs no trip at all — it is identified by managerRef alone (check the minted JWT: no trip claim anywhere in it). The tripRef below belongs to THIS SCREEN only: proving "a real request went through" means calling some real method, and KaafilClient (the browser SDK) currently exposes exactly two resource groups — journey and vendors — both trip-scoped. There is no manager-only call to borrow instead (GAPS.md: no-manager-scoped-client-call) — a real SDK gap, not a property of the session.',
-    p: [{ n: 'tripRef', l: 'tripRef (only to prove one real call — unrelated to the session itself)', k: 'text' }],
+    note: 'The SDK exchanges the refresh token itself — pre-emptively and on a 401. This button only forces what it already does. The session needs no trip at all — it is identified by managerRef alone (check the minted JWT: no trip claim anywhere in it), and neither does this proof call: kaafil-js@0.1.0-beta.2 added client.notifications.list() (GET /api/v1/managers/me/notifications), the one genuinely manager-only, non-trip-scoped read in the vendored contract — closing the SDK gap the previous revision of this screen had to work around.',
+    p: [],
     req: () => ['POST', '/api/v1/auth/manager-token/refresh', { refreshToken: 'kf_ref_…' }],
     snip: () => `// no code: the SDK rotates on its own.\n// onRefresh fires with the new pair — persist it, that's all.`,
     run: () => {
@@ -120,24 +120,19 @@ export const sessionSpecs = (c: any) => ({
     // one real authenticated call through the open session and report that
     // it went through; whether the resolver actually rotated depends on how
     // close the access token is to expiry, which this button cannot force.
-    live: async (p: any) => {
+    live: async () => {
       try {
         const s = currentSession();
         if (!s) return c.fail('SessionRequiredError', null, null, 'No manager session minted yet — run session.mint (and session.open) first.');
-        // `tripRef` here is THIS SCREEN's own param, not carried over from
-        // `session.mint` (which no longer collects one at all — the session
-        // itself doesn't need it). See this spec's `note` for why a trip is
-        // still needed for the proof call specifically.
-        if (!String(p.tripRef || '').trim()) return c.fail('NothingToActOn', null, null, "This screen's rotation proof borrows journey.get (the only trip-scoped call KaafilClient exposes) to make one real request — not because the session itself needs a trip. Paste a real tripRef (one you've pushed via trips.upsert) above to exercise this proof for real.");
         const client = sdkClient();
-        // Captures the one real call's own `meta` (`journey.get`'s real
-        // engine response) rather than fabricating one — this method makes
-        // no OTHER call, so there is no "which call is primary" question.
-        const body = await client.journey.get({ tripRef: p.tripRef });
+        // Captures the one real call's own `meta` rather than fabricating one
+        // — this method makes no OTHER call, so there is no "which call is
+        // primary" question. No tripRef anywhere: `notifications.list()` is
+        // genuinely manager-scoped, not trip-scoped.
+        const body = await client.notifications.list();
         const { meta } = okFromSdk(body);
         return okLive({
-          note: 'Rotation is fully automatic in this SDK — there is no public "force rotate" method. This made one real authenticated request (journey.get) through the open session so the credential resolver had a chance to pre-emptively refresh; it only actually rotates when the access token is near expiry.',
-          tripRef: p.tripRef,
+          note: 'Rotation is fully automatic in this SDK — there is no public "force rotate" method. This made one real authenticated request (notifications.list) through the open session so the credential resolver had a chance to pre-emptively refresh; it only actually rotates when the access token is near expiry.',
         }, meta);
       } catch (err) {
         return toFail(err);
@@ -149,7 +144,7 @@ export const sessionSpecs = (c: any) => ({
     note: 'The credential boundary is structural, not a 401 you find in staging: this throws before a request is ever built.',
     p: [],
     req: () => ['—', 'refused locally — no request is built', null],
-    snip: () => `client.close();\nawait client.journey.get({ tripRef }); // throws KaafilClientNotOpenError`,
+    snip: () => `client.close();\nawait client.notifications.list(); // throws KaafilClientNotOpenError`,
     run: () => {
       if (c.sim.session) c.sim.session.open = false;
       c.sim.closed = true;
@@ -168,13 +163,12 @@ export const sessionSpecs = (c: any) => ({
         const probe = new KaafilClient({ environment: 'test', baseUrl: s.baseUrl });
         probe.session.open({ accessToken: s.accessToken, refreshToken: s.refreshToken, expiresAt: s.expiresAt });
         probe.close();
-        // `close()` nulls the client's internal state, so `journey.get`
+        // `close()` nulls the client's internal state, so `notifications.list()`
         // throws `KaafilClientNotOpenError` synchronously via its own
         // `#requireState()` guard — before any URL is built, before any
-        // fetch. Unlike `session.rotate`, no real request is ever attempted
-        // here, so the tripRef value genuinely cannot matter; a real one
-        // isn't needed to make this demonstration honest.
-        await probe.journey.get({ tripRef: 'closed-client-probe' });
+        // fetch. Genuinely manager-scoped, not trip-scoped — no tripRef to
+        // supply here at all, real or otherwise.
+        await probe.notifications.list();
         return c.fail('KaafilError', null, null, 'Expected KaafilClientNotOpenError after close() — the call went through instead. This is a real, unexpected result, not a simulated one.');
       } catch (err) {
         return toFail(err);
@@ -189,7 +183,10 @@ export const sessionSpecs = (c: any) => ({
     // shape is `config.sections` (a bag of per-section booleans). See
     // `../live/lane.ts`'s `sectionsForSubject`.
     req: (p: any) => ['POST', '/api/v1/share-tokens', { tripRef: p.tripRef, config: { sections: sectionsForSubject(p.subject) }, expiresAt: '+' + p.hours + 'h' }],
-    snip: (p: any) => `const { data } = await kaafil.shareTokens.create({\n  tripRef: '${p.tripRef}',\n  subject: '${p.subject}',\n  expiresAt: new Date(Date.now() + ${p.hours} * 3600e3), // a Date, not a formatted string\n});`,
+    // `MintShareTokenRequest` has no `subject` field — shown as the real
+    // `config.sections` bag it actually is, not the sim's simplified
+    // `subject` param, which would not compile against the real SDK.
+    snip: (p: any) => `const { data } = await kaafil.shareTokens.create({\n  tripRef: '${p.tripRef}',\n  config: { sections: ${JSON.stringify(sectionsForSubject(p.subject))} },\n  expiresAt: new Date(Date.now() + ${p.hours} * 3600e3), // a Date, not a formatted string\n});`,
     run: (p: any) => c.ok({ token: 'kf_shr_' + Math.random().toString(36).slice(2, 14), subject: p.subject, tripRef: p.tripRef, expiresAt: new Date(Date.now() + Number(p.hours) * 3600e3).toISOString() }),
     live: async (p: any) => {
       try {

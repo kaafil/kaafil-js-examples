@@ -96,7 +96,11 @@ export const journeySpecs = (c: any) => ({
     // has `tripRef`; see `resolveAgencyRef` above for how `live(p)` resolves
     // the real path segment this preview can't derive from `p` alone.
     req: (p: any) => ['GET', '/api/v1/agencies/{agencyRef}/journey-triggers', null],
-    snip: (p: any) => `const { data } = await kaafil.journey.triggers.list({ tripRef: '${p.tripRef}' });`,
+    // `ListJourneyTriggersOptions` is `{ agencyRef }`, not `{ tripRef }` —
+    // this screen has no `agencyRef` param to show one from (see `live()`'s
+    // `resolveAgencyRef()` below), so the snippet reads it off your own
+    // agency record rather than showing a param this method doesn't accept.
+    snip: () => `const { data } = await kaafil.journey.triggers.list({ agencyRef: yourAgency.ref });`,
     run: () => c.ok([
       { key: 'boarding.autoOpen', enabled: true, firesAt: 'T-12h' },
       { key: 'rooming.autoAssignOnManifest', enabled: false, firesAt: null },

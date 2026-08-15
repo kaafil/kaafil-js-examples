@@ -10,14 +10,14 @@
 // `../live/lane.ts`'s header explains the shared `okFromSdk`/`toFail`
 // envelope contract and why array/list responses need `meta` synthesized.
 
-import { sdkCall, managerClient, currentSession } from '../live/transport';
+import { sdkCall, managerClient } from '../live/transport';
 import { okFromSdk, okLive, toFail } from '../live/lane';
 
 export const floatSpecs = (c: any) => ({
   'float.read': {
     lane: 'D', view: 'money',
     note: 'The balance is the sum of its movements, never a stored number — which is what makes the negative-float guard checkable rather than a hope.',
-    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01' }],
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01', ref: true, refHint: "paste the id trips.managers.upsert's response returned — mgr_lead_01 only exists in Simulated mode" }],
     req: (p: any) => ['GET', '/api/v1/trips/' + p.tripRef + '/float/' + p.managerRef + '/ledger', null],
     snip: () => `// ISSUE / RETURN / ADJUSTMENT — three movement kinds, one balance.`,
     run: (p: any) => { const m = c.ensureMoney(p.tripRef); return m ? c.ok({ managerRef: p.managerRef, balanceMinor: m.float.balanceMinor, movements: m.float.movements }) : c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.'); },
@@ -47,7 +47,7 @@ export const floatSpecs = (c: any) => ({
   'float.issue': {
     lane: 'D', view: 'money',
     note: 'Cash handed to a named manager on a named trip. Inter-manager transfers are deliberately not a movement kind — deferred, not forgotten.',
-    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01' }, { n: 'amountMinor', l: 'amountMinor (paise)', k: 'num', v: 500000 }],
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01', ref: true, refHint: "paste the id trips.managers.upsert's response returned — mgr_lead_01 only exists in Simulated mode" }, { n: 'amountMinor', l: 'amountMinor (paise)', k: 'num', v: 500000 }],
     req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/float/issue', { managerId: p.managerRef, amountMinor: Number(p.amountMinor) }],
     snip: (p: any) => `await post('/trips/' + tripRef + '/float/issue', {\n  managerId: '${p.managerRef}', amountMinor: ${p.amountMinor},\n}, { 'Idempotency-Key': key });`,
     run: (p: any) => { const m = c.ensureMoney(p.tripRef); if (!m) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.'); const amt = Math.round(Number(p.amountMinor)); m.float.balanceMinor += amt; m.float.movements.unshift({ id: 'flt_' + (++c.sim.seq), kind: 'ISSUE', amountMinor: amt, note: null, at: c.nowIso() }); return c.ok({ kind: 'ISSUE', amountMinor: amt, balanceMinor: m.float.balanceMinor }); },
@@ -60,7 +60,7 @@ export const floatSpecs = (c: any) => ({
   'float.return': {
     lane: 'D', view: 'money',
     note: 'A return that would take the balance below zero is refused: the guard is on the derived balance, so no sequence of legal-looking movements can produce a negative one.',
-    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01' }, { n: 'amountMinor', l: 'amountMinor (paise)', k: 'num', v: 100000 }],
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01', ref: true, refHint: "paste the id trips.managers.upsert's response returned — mgr_lead_01 only exists in Simulated mode" }, { n: 'amountMinor', l: 'amountMinor (paise)', k: 'num', v: 100000 }],
     errs: [{ l: 'return more than held → 422', patch: { amountMinor: 99900000 } }],
     req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/float/return', { managerId: p.managerRef, amountMinor: Number(p.amountMinor) }],
     snip: (p: any) => `await post('/trips/' + tripRef + '/float/return', {\n  managerId: '${p.managerRef}', amountMinor: ${p.amountMinor},\n});`,
@@ -82,10 +82,10 @@ export const floatSpecs = (c: any) => ({
   'float.adjust': {
     lane: 'D', view: 'money',
     note: 'An ADJUSTMENT must carry a note. A correction with no stated reason is indistinguishable from a mistake, so the schema refuses one.',
-    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'amountMinor', l: 'amountMinor (± paise)', k: 'num', v: -25000 }, { n: 'note', l: 'note', k: 'text', v: 'Counted 250 short at handover' }],
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01', ref: true, refHint: "paste the id trips.managers.upsert's response returned — mgr_lead_01 only exists in Simulated mode" }, { n: 'amountMinor', l: 'amountMinor (± paise)', k: 'num', v: -25000 }, { n: 'note', l: 'note', k: 'text', v: 'Counted 250 short at handover' }],
     errs: [{ l: 'adjustment with no note → 422', patch: { note: '' } }],
-    req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/float/adjust', { managerId: currentSession()?.managerRef ?? 'mgr_lead_01', amountMinor: Math.abs(Number(p.amountMinor)), direction: Number(p.amountMinor) >= 0 ? 'IN' : 'OUT', note: p.note }],
-    snip: (p: any) => `await post('/trips/' + tripRef + '/float/adjust', {\n  amountMinor: ${p.amountMinor}, note: '${p.note}',   // note is required here\n});`,
+    req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/float/adjust', { managerId: p.managerRef, amountMinor: Math.abs(Number(p.amountMinor)), direction: Number(p.amountMinor) >= 0 ? 'IN' : 'OUT', note: p.note }],
+    snip: (p: any) => `await post('/trips/' + tripRef + '/float/adjust', {\n  managerId: '${p.managerRef}', amountMinor: ${p.amountMinor}, note: '${p.note}',   // note is required here\n});`,
     run: (p: any) => {
       const m = c.ensureMoney(p.tripRef); if (!m) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
       if (!String(p.note).trim()) return c.fail('KaafilValidationError', 'VALIDATION_ERROR', 422, 'An ADJUSTMENT movement must carry a note saying why the balance moved.', { fields: { note: 'required for ADJUSTMENT' } });
@@ -95,19 +95,18 @@ export const floatSpecs = (c: any) => ({
       m.float.movements.unshift({ id: 'flt_' + (++c.sim.seq), kind: 'ADJUSTMENT', amountMinor: amt, note: p.note, at: c.nowIso() });
       return c.ok({ kind: 'ADJUSTMENT', amountMinor: amt, note: p.note, balanceMinor: m.float.balanceMinor });
     },
-    // sdk lane: `adjustFloat` accepts an API key. The sim's UI has no
-    // `managerRef` field for this method (only `tripRef`/`amountMinor`/
-    // `note`) — real `AdjustFloatRequest.managerId` is required regardless,
-    // so this uses the OPEN SESSION's own `managerRef` (the one `mintSession`
-    // was called with), falling back to the same demo default the other
-    // float methods' params use. `direction`/positive `amountMinor` are
-    // derived from the sim's single signed field, never fabricated.
+    // sdk lane: `adjustFloat` accepts an API key. `AdjustFloatRequest.managerId`
+    // is the manager whose float is being corrected — not necessarily whoever's
+    // browser session happens to be open (an apiKeyAuth/CRM-backend call has
+    // no reason to assume one even exists) — so this is its own param, same
+    // shape as `float.issue`/`float.return`'s `managerRef`, never borrowed off
+    // `currentSession()`. `direction`/positive `amountMinor` are derived from
+    // the sim's single signed field, never fabricated.
     live: async (p: any) => {
       try {
-        const managerId = currentSession()?.managerRef ?? 'mgr_lead_01';
         const amt = Math.round(Number(p.amountMinor));
         return okFromSdk(await sdkCall(['float', 'adjust'], {
-          tripRef: p.tripRef, managerId, amountMinor: Math.abs(amt), direction: amt >= 0 ? 'IN' : 'OUT', note: p.note,
+          tripRef: p.tripRef, managerId: p.managerRef, amountMinor: Math.abs(amt), direction: amt >= 0 ? 'IN' : 'OUT', note: p.note,
         }));
       } catch (e) { return toFail(e); }
     }

@@ -21,7 +21,11 @@ export const shareSpecs = (c: any) => ({
     // shape is `config.sections` (a bag of per-section booleans). See
     // `../live/lane.ts`'s `sectionsForSubject`.
     req: (p: any) => ['POST', '/api/v1/share-tokens', { tripRef: p.tripRef, config: { sections: sectionsForSubject(p.subject) }, expiresAt: '+' + p.hours + 'h' }],
-    snip: (p: any) => `const { data } = await kaafil.shareTokens.create({\n  tripRef: '${p.tripRef}', subject: '${p.subject}',\n  expiresAt: new Date(Date.now() + ${p.hours} * 3600e3),\n});\n// wrap data.token in YOUR OWN link — Kaafil sends nothing`,
+    // `MintShareTokenRequest` has no `subject` field at all — shown as the
+    // real `config.sections` bag it actually is (see this spec's header and
+    // `sectionsForSubject` in `../live/lane.ts`), not the sim's simplified
+    // `subject` param, which would not compile against the real SDK.
+    snip: (p: any) => `const { data } = await kaafil.shareTokens.create({\n  tripRef: '${p.tripRef}',\n  config: { sections: ${JSON.stringify(sectionsForSubject(p.subject))} },\n  expiresAt: new Date(Date.now() + ${p.hours} * 3600e3),\n});\n// wrap data.token in YOUR OWN link — Kaafil sends nothing`,
     run: (p: any) => {
       const t = c.sim.trips[p.tripRef]; if (!t) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
       const asked = Date.now() + Number(p.hours) * 3600e3;
