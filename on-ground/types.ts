@@ -618,3 +618,199 @@ export interface ChecklistTemplateRow {
 export interface ChecklistTemplatesList {
   readonly templates: readonly ChecklistTemplateRow[];
 }
+
+// ── float / expenses / collections / files (money walkthrough) ──────────────
+//
+// Added for the money walkthrough. `kaafil-js` carries NO `float`, `expenses`,
+// `collections` or `files` resource group at all — unlike itinerary/rooming
+// (which the SDK DOES expose, read-only, on the API-key client), there is no
+// generated type ANYWHERE in `kaafil-js` for any of these four modules' wire
+// shapes. Every one of these four modules' writes is `auth: 'manager'` alone
+// (float's `issue`/`adjust` also accept an API key, but this walkthrough uses
+// the manager session throughout for consistency with the rest of this file),
+// so this stand-in is the only path to any of them from this repo, exactly as
+// it already is for itinerary/rooming/seating/pickups/treks/checklists above.
+// The ONE exception is `expenses`' claim-status ingest, which is `auth:
+// 'apiKey'` — the CRM's own credential — and therefore does not belong on this
+// manager-session client at all; `server/simulate.ts` calls it directly with a
+// small dedicated helper, documented at its own call site.
+
+export type FloatMovementType = 'ISSUE' | 'RETURN' | 'ADJUSTMENT' | 'EXPENSE';
+export type FloatDirection = 'IN' | 'OUT';
+
+export interface FloatSummaryRow {
+  readonly managerId: string;
+  readonly managerRef: string | null;
+  readonly issuedMinor: number;
+  readonly returnedMinor: number;
+  readonly spentMinor: number;
+  readonly adjustmentsMinor: number;
+  readonly balanceMinor: number;
+  readonly currency: string;
+}
+
+/** `GET /trips/:ref/float`'s response is `{ data: [...] }` — one extra layer
+ * of nesting `listCollections`/`listExpenses` do NOT have (both of those
+ * answer a bare array or `{ items }`, never `{ data }`); the field name and the
+ * envelope's own `data` collide only in spelling, not in shape. */
+export interface FloatSummaryList {
+  readonly data: readonly FloatSummaryRow[];
+}
+
+export interface FloatLedgerRow {
+  readonly id: string;
+  readonly managerId: string;
+  readonly managerRef: string | null;
+  readonly type: FloatMovementType;
+  readonly direction: FloatDirection;
+  readonly amountMinor: number;
+  readonly currency: string;
+  readonly note: string | null;
+  readonly reversesMovementId: string | null;
+  readonly linkedExpenseId: string | null;
+  readonly createdByManagerRef: string | null;
+  readonly clientRef: string | null;
+  readonly runningBalanceMinor: number;
+  readonly version: number;
+  readonly createdAt: string;
+}
+
+export interface FloatLedgerList {
+  readonly data: readonly FloatLedgerRow[];
+}
+
+/** The shared response shape of `issue`/`return`/`adjust` — one row, not a list. */
+export interface FloatMovement {
+  readonly movementId: string;
+  readonly managerId: string;
+  readonly managerRef: string | null;
+  readonly type: FloatMovementType;
+  readonly direction: FloatDirection;
+  readonly amountMinor: number;
+  readonly currency: string;
+  readonly note: string | null;
+  readonly balanceBeforeMinor: number;
+  readonly balanceAfterMinor: number;
+  readonly version: number;
+  readonly createdAt: string;
+}
+
+export type ExpenseCategory = 'ACCOM' | 'FOOD' | 'TRANSPORT' | 'ACTIVITY' | 'MISC';
+export type ExpensePaymentMode = 'FLOAT_CASH' | 'PERSONAL' | 'OTHER';
+export type ExpenseClaimStatus = 'SUBMITTED' | 'WITHDRAWN' | 'APPROVED' | 'PAID' | 'REJECTED';
+
+export interface Expense {
+  readonly id: string;
+  readonly category: ExpenseCategory;
+  readonly amountMinor: number;
+  readonly currency: string;
+  readonly paymentMode: ExpensePaymentMode;
+  readonly description: string;
+  readonly vendorId: string | null;
+  readonly receiptEvidenceText: string | null;
+  readonly receiptFileKey: string | null;
+  readonly hasLocalReceiptBlob: boolean;
+  readonly missingReceipt: boolean;
+  readonly receiptRequired: boolean;
+  /** Set in the SAME transaction as the log, for a `FLOAT_CASH` row only. */
+  readonly floatMovementId: string | null;
+  readonly loggedByManagerId: string;
+  readonly spentAt: string;
+  readonly claimStatus: ExpenseClaimStatus | null;
+  readonly claimSubmittedAt: string | null;
+  /** The CRM's own decision stamp — the LWW cursor `claim-status` judges a
+   * re-push's staleness against (strictly older is dropped, equal is
+   * RE-APPLIED, never merely "already applied"). */
+  readonly crmDecisionAt: string | null;
+  readonly crmDecisionNote: string | null;
+  readonly crmPaymentReference: string | null;
+  readonly reportedAt: string | null;
+  readonly voidedAt: string | null;
+  readonly voidReason: string | null;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** `POST …/claim-status`'s own response — the canonical `Expense` plus the
+ * one field that tells an `applied` push from an `ignored_stale` one, which
+ * `IngestLog` (unreadable to the CRM) is otherwise the only record of. */
+export interface ClaimStatusIngestResult extends Expense {
+  readonly verdict: 'applied' | 'ignored_stale';
+}
+
+export interface ExpenseCategoryTotals {
+  readonly ACCOM: number;
+  readonly FOOD: number;
+  readonly TRANSPORT: number;
+  readonly ACTIVITY: number;
+  readonly MISC: number;
+}
+
+/** `GET /trips/:ref/expenses`'s response — an `{ items }` object, never a bare
+ * array (`listCollections`' own shape, immediately below, IS a bare array —
+ * the two modules do not share one convention here). */
+export interface ExpenseList {
+  readonly items: readonly DeltaRow<Expense>[];
+  readonly categoryTotals: ExpenseCategoryTotals;
+  readonly spendTotalMinor: number;
+}
+
+export type CollectionMode = 'CASH' | 'UPI' | 'CARD' | 'BANK';
+
+export interface Collection {
+  readonly id: string;
+  readonly travellerId: string;
+  readonly amountMinor: number;
+  readonly currency: string;
+  readonly mode: CollectionMode;
+  readonly reference: string | null;
+  readonly note: string | null;
+  readonly collectedByManagerId: string;
+  readonly collectedAt: string;
+  readonly reportedAt: string | null;
+  readonly voidedAt: string | null;
+  readonly voidReason: string | null;
+  /** `null` for the advance case ONLY (no `Balance` row, or a credit
+   * `dueMinor`) — both collapse to the same `null` on purpose (FRD §8). */
+  readonly outstandingMinor: number | null;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface EligibleBalanceRow {
+  readonly travellerId: string;
+  readonly totalMinor: number;
+  readonly dueMinor: number;
+  readonly collectedMinor: number;
+  readonly outstandingMinor: number;
+  readonly currency: string;
+}
+
+export type FilePurpose = 'expense_receipt' | 'form_attachment' | 'booking_voucher';
+export type FileStatus = 'pending' | 'ready' | 'orphaned' | 'purged';
+
+/** `POST /api/v1/files`'s response — a one-time upload SLOT, never the
+ * canonical `FileRecord` below. `uploadUrl` appears nowhere else. */
+export interface FileUploadSlot {
+  readonly fileId: string;
+  readonly uploadUrl: string;
+  readonly expiresAt: string;
+}
+
+/** The metadata skeleton — identical shape whatever the status, so a reader
+ * branches on `status` alone, never on field presence (FRD §4.4). */
+export interface FileRecord {
+  readonly id: string;
+  readonly purpose: FilePurpose;
+  readonly retentionClass: 'FINANCIAL' | 'CONSENT_EVIDENCE' | 'TRAVELLER_PII' | 'OPERATIONAL' | null;
+  readonly contentType: string;
+  readonly sizeBytes: number;
+  readonly status: FileStatus;
+  readonly purgeAt: string | null;
+  readonly purgedAt: string | null;
+  readonly createdAt: string;
+  readonly confirmedAt: string | null;
+  readonly version: number;
+}

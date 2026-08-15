@@ -55,6 +55,20 @@ import type {
   ChecklistPhase,
   ChecklistTemplatesList,
   ChecklistToggleResult,
+  Collection,
+  CollectionMode,
+  EligibleBalanceRow,
+  Expense,
+  ExpenseCategory,
+  ExpenseClaimStatus,
+  ExpenseList,
+  ExpensePaymentMode,
+  FileRecord,
+  FilePurpose,
+  FileUploadSlot,
+  FloatLedgerList,
+  FloatMovement,
+  FloatSummaryList,
   ItineraryRead,
   OnGroundResponse,
   PickupAssignResult,
@@ -312,6 +326,131 @@ export interface OnGroundClient {
       }): Promise<OnGroundResponse<ChecklistAggregate>>;
     };
   };
+  /**
+   * Added for the money walkthrough. `kaafil-js` carries no `float` resource
+   * group at all — unlike itinerary/rooming/checklists, there is no
+   * API-key-side read of ANY of it either. This stand-in is the ONLY path to
+   * float from this repo.
+   */
+  readonly float: {
+    readSummary(args: { tripRef: string; since?: string }): Promise<OnGroundResponse<FloatSummaryList>>;
+    readLedger(args: { tripRef: string; managerId: string }): Promise<OnGroundResponse<FloatLedgerList>>;
+    issue(args: {
+      tripRef: string;
+      managerId: string;
+      amountMinor: number;
+      note?: string;
+      clientRef?: string;
+      idempotencyKey?: string;
+    }): Promise<OnGroundResponse<FloatMovement>>;
+    return(args: {
+      tripRef: string;
+      managerId: string;
+      amountMinor: number;
+      note?: string;
+      clientRef?: string;
+      idempotencyKey?: string;
+    }): Promise<OnGroundResponse<FloatMovement>>;
+    adjust(args: {
+      tripRef: string;
+      managerId: string;
+      amountMinor: number;
+      direction: 'IN' | 'OUT';
+      note: string;
+      clientRef?: string;
+      idempotencyKey?: string;
+    }): Promise<OnGroundResponse<FloatMovement>>;
+  };
+  /**
+   * Added for the money walkthrough. `kaafil-js` carries no `expenses`
+   * resource group either — with ONE exception this client does NOT cover:
+   * the claim-status ingest (`POST …/expenses/:id/claim-status`) is `auth:
+   * 'apiKey'`, the CRM's own credential, never `managerAuth` — a write this
+   * manager-session client cannot make even in principle. `server/
+   * simulate.ts` calls it directly, with its own small helper, documented at
+   * that call site rather than smuggled in here under the wrong credential.
+   */
+  readonly expenses: {
+    list(args: {
+      tripRef: string;
+      category?: ExpenseCategory;
+      loggedByManagerId?: string;
+      paymentMode?: ExpensePaymentMode;
+      claimStatus?: ExpenseClaimStatus;
+      missingReceiptOnly?: boolean;
+      receiptRequiredOnly?: boolean;
+      since?: string;
+    }): Promise<OnGroundResponse<ExpenseList>>;
+    read(args: { tripRef: string; id: string }): Promise<OnGroundResponse<Expense>>;
+    log(args: {
+      tripRef: string;
+      amountMinor: number;
+      currency?: string;
+      category: ExpenseCategory;
+      paymentMode: ExpensePaymentMode;
+      description: string;
+      vendorId?: string;
+      receiptEvidenceText?: string;
+      receiptFileKey?: string;
+      receiptPending?: boolean;
+      spentAt?: string;
+      submitClaim?: boolean;
+      clientRef?: string;
+      /** Exposed (unlike every other typed write here) so the idempotency-
+       * replay demonstration can pin the SAME key across two calls on
+       * purpose — the one thing this walkthrough step is FOR. */
+      idempotencyKey?: string;
+    }): Promise<OnGroundResponse<Expense>>;
+    void(args: { tripRef: string; id: string; ifMatch: number; reason: string }): Promise<OnGroundResponse<Expense>>;
+    linkReceipt(args: {
+      tripRef: string;
+      id: string;
+      receiptFileKey: string;
+    }): Promise<OnGroundResponse<Expense>>;
+    submitClaim(args: { tripRef: string; id: string }): Promise<OnGroundResponse<Expense>>;
+    withdrawClaim(args: { tripRef: string; id: string; ifMatch: number }): Promise<OnGroundResponse<Expense>>;
+  };
+  /** Added for the money walkthrough — same absence, same reasoning as
+   * `float`/`expenses` above. */
+  readonly collections: {
+    list(args: { tripRef: string; travellerId?: string; since?: string }): Promise<OnGroundResponse<readonly Collection[]>>;
+    listEligible(args: { tripRef: string }): Promise<OnGroundResponse<readonly EligibleBalanceRow[]>>;
+    record(args: {
+      tripRef: string;
+      travellerId: string;
+      amountMinor: number;
+      currency?: string;
+      mode: CollectionMode;
+      reference?: string;
+      note?: string;
+      collectedAt?: string;
+      clientRef?: string;
+      idempotencyKey?: string;
+    }): Promise<OnGroundResponse<Collection>>;
+    void(args: { tripRef: string; id: string; ifMatch: number; reason: string }): Promise<OnGroundResponse<Collection>>;
+  };
+  /**
+   * Added for the money walkthrough. `files`' TWO writes
+   * (`requestUpload`/`confirm`) are `auth: 'manager'` alone, identically to
+   * `float`/`expenses`/`collections` above — no SDK code path exists to
+   * either. The two reads accept `apiKey` too, but this client stays
+   * manager-session throughout for consistency with the rest of the file.
+   * The actual `PUT` of bytes to `uploadUrl` is NOT a Kaafil call at all (no
+   * Kaafil auth header, ever) — `../on-ground/upload.ts`'s
+   * `putPresignedBytes` does that half, and `server/simulate.ts` calls it
+   * directly between `requestUpload` and `confirm`.
+   */
+  readonly files: {
+    requestUpload(args: {
+      purpose: FilePurpose;
+      tripRef: string;
+      contentType: string;
+      sizeBytes: number;
+    }): Promise<OnGroundResponse<FileUploadSlot>>;
+    confirm(args: { fileId: string }): Promise<OnGroundResponse<FileRecord>>;
+    read(args: { fileId: string }): Promise<OnGroundResponse<FileRecord>>;
+    readUrl(args: { fileId: string }): Promise<OnGroundResponse<{ url: string; expiresAt: string }>>;
+  };
   /** The raw call, for the probes that must send something the typed methods
    * above deliberately cannot express — a client-supplied `sortOrder`, a
    * `status: 'LIVE'`. Both are refusals worth demonstrating, and a typed
@@ -348,13 +487,20 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
     if (spec.ifMatch !== undefined) {
       headers['If-Match'] = String(spec.ifMatch);
     }
-    if (spec.method === 'POST') {
-      // A fresh key per POST. The engine replays the first answer for a repeated
-      // key, so a retry cannot double-add an item — which is why the POSTs are
-      // the routes that declare the header at all. `PATCH` and `DELETE` here are
-      // guarded by `If-Match` instead: a replayed version-guarded write is a 409,
-      // which is already the right answer, and sending an idempotency key on a
-      // route that does not declare one would be inventing a contract.
+    if (spec.method === 'POST' || spec.idempotencyKey !== undefined) {
+      // A fresh key per POST by default. The engine replays the first answer
+      // for a repeated key, so a retry cannot double-add an item — which is
+      // why POST is the method that gets one automatically. `PATCH` and
+      // `DELETE` here are guarded by `If-Match` instead for most routes: a
+      // replayed version-guarded write is a 409, which is already the right
+      // answer, and sending an idempotency key on a route that does not
+      // declare one would be inventing a contract — so this stays OFF for
+      // every non-POST call UNLESS the caller explicitly passed
+      // `idempotencyKey` (money's `linkExpenseReceipt` is the one PATCH route
+      // in this walkthrough that requires the header despite having no
+      // `If-Match` — `expenses.routes.ts`'s own doc explains why: it
+      // back-fills a key the log op could not carry offline, so there is no
+      // client-held version for `If-Match` to guard instead).
       headers['Idempotency-Key'] = spec.idempotencyKey ?? crypto.randomUUID();
     }
 
@@ -395,6 +541,12 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
     `/api/v1/treks/${encodeURIComponent(trekRef)}${suffix}`;
   const checklistPath = (tripRef: string, suffix = ''): string =>
     `/api/v1/trips/${encodeURIComponent(tripRef)}/checklist${suffix}`;
+  const floatPath = (tripRef: string, suffix = ''): string =>
+    `/api/v1/trips/${encodeURIComponent(tripRef)}/float${suffix}`;
+  const expensesPath = (tripRef: string, suffix = ''): string =>
+    `/api/v1/trips/${encodeURIComponent(tripRef)}/expenses${suffix}`;
+  const collectionsPath = (tripRef: string, suffix = ''): string =>
+    `/api/v1/trips/${encodeURIComponent(tripRef)}/collections${suffix}`;
 
   return {
     itinerary: {
@@ -659,6 +811,242 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
             body: { templateSectionId, mode },
           });
         },
+      },
+    },
+    float: {
+      async readSummary({ tripRef, since }) {
+        return request<FloatSummaryList>({
+          method: 'GET',
+          path: floatPath(tripRef),
+          query: { since },
+        });
+      },
+      async readLedger({ tripRef, managerId }) {
+        return request<FloatLedgerList>({
+          method: 'GET',
+          path: floatPath(tripRef, `/${encodeURIComponent(managerId)}/ledger`),
+        });
+      },
+      async issue({ tripRef, managerId, amountMinor, note, clientRef, idempotencyKey }) {
+        return request<FloatMovement>({
+          method: 'POST',
+          path: floatPath(tripRef, '/issue'),
+          body: {
+            managerId,
+            amountMinor,
+            ...(note !== undefined ? { note } : {}),
+            ...(clientRef !== undefined ? { clientRef } : {}),
+          },
+          ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        });
+      },
+      async return({ tripRef, managerId, amountMinor, note, clientRef, idempotencyKey }) {
+        return request<FloatMovement>({
+          method: 'POST',
+          path: floatPath(tripRef, '/return'),
+          body: {
+            managerId,
+            amountMinor,
+            ...(note !== undefined ? { note } : {}),
+            ...(clientRef !== undefined ? { clientRef } : {}),
+          },
+          ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        });
+      },
+      async adjust({ tripRef, managerId, amountMinor, direction, note, clientRef, idempotencyKey }) {
+        return request<FloatMovement>({
+          method: 'POST',
+          path: floatPath(tripRef, '/adjust'),
+          body: {
+            managerId,
+            amountMinor,
+            direction,
+            note,
+            ...(clientRef !== undefined ? { clientRef } : {}),
+          },
+          ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        });
+      },
+    },
+    expenses: {
+      async list({
+        tripRef,
+        category,
+        loggedByManagerId,
+        paymentMode,
+        claimStatus,
+        missingReceiptOnly,
+        receiptRequiredOnly,
+        since,
+      }) {
+        return request<ExpenseList>({
+          method: 'GET',
+          path: expensesPath(tripRef),
+          query: {
+            category,
+            loggedByManagerId,
+            paymentMode,
+            claimStatus,
+            missingReceiptOnly: missingReceiptOnly === undefined ? undefined : String(missingReceiptOnly),
+            receiptRequiredOnly: receiptRequiredOnly === undefined ? undefined : String(receiptRequiredOnly),
+            since,
+          },
+        });
+      },
+      async read({ tripRef, id }) {
+        return request<Expense>({
+          method: 'GET',
+          path: expensesPath(tripRef, `/${encodeURIComponent(id)}`),
+        });
+      },
+      async log({
+        tripRef,
+        amountMinor,
+        currency,
+        category,
+        paymentMode,
+        description,
+        vendorId,
+        receiptEvidenceText,
+        receiptFileKey,
+        receiptPending,
+        spentAt,
+        submitClaim,
+        clientRef,
+        idempotencyKey,
+      }) {
+        return request<Expense>({
+          method: 'POST',
+          path: expensesPath(tripRef),
+          body: {
+            amountMinor,
+            currency: currency ?? 'INR',
+            category,
+            paymentMode,
+            description,
+            ...(vendorId !== undefined ? { vendorId } : {}),
+            ...(receiptEvidenceText !== undefined ? { receiptEvidenceText } : {}),
+            ...(receiptFileKey !== undefined ? { receiptFileKey } : {}),
+            ...(receiptPending !== undefined ? { receiptPending } : {}),
+            ...(spentAt !== undefined ? { spentAt } : {}),
+            ...(submitClaim !== undefined ? { submitClaim } : {}),
+            ...(clientRef !== undefined ? { clientRef } : {}),
+          },
+          ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        });
+      },
+      async void({ tripRef, id, ifMatch, reason }) {
+        return request<Expense>({
+          method: 'DELETE',
+          path: expensesPath(tripRef, `/${encodeURIComponent(id)}/void`),
+          body: { reason },
+          ifMatch,
+        });
+      },
+      async linkReceipt({ tripRef, id, receiptFileKey }) {
+        return request<Expense>({
+          method: 'PATCH',
+          path: expensesPath(tripRef, `/${encodeURIComponent(id)}/receipt`),
+          body: { receiptFileKey },
+          // Required on THIS route despite being a PATCH with no `If-Match`
+          // — see `request()`'s own comment above for why that combination
+          // is real here and not a mistake copied from elsewhere.
+          idempotencyKey: crypto.randomUUID(),
+        });
+      },
+      async submitClaim({ tripRef, id }) {
+        return request<Expense>({
+          method: 'POST',
+          path: expensesPath(tripRef, `/${encodeURIComponent(id)}/claim`),
+          body: {},
+        });
+      },
+      async withdrawClaim({ tripRef, id, ifMatch }) {
+        return request<Expense>({
+          method: 'DELETE',
+          path: expensesPath(tripRef, `/${encodeURIComponent(id)}/claim/withdraw`),
+          body: {},
+          ifMatch,
+        });
+      },
+    },
+    collections: {
+      async list({ tripRef, travellerId, since }) {
+        return request<readonly Collection[]>({
+          method: 'GET',
+          path: collectionsPath(tripRef),
+          query: { travellerId, since },
+        });
+      },
+      async listEligible({ tripRef }) {
+        return request<readonly EligibleBalanceRow[]>({
+          method: 'GET',
+          path: collectionsPath(tripRef, '/eligible'),
+        });
+      },
+      async record({
+        tripRef,
+        travellerId,
+        amountMinor,
+        currency,
+        mode,
+        reference,
+        note,
+        collectedAt,
+        clientRef,
+        idempotencyKey,
+      }) {
+        return request<Collection>({
+          method: 'POST',
+          path: collectionsPath(tripRef),
+          body: {
+            travellerId,
+            amountMinor,
+            currency: currency ?? 'INR',
+            mode,
+            ...(reference !== undefined ? { reference } : {}),
+            ...(note !== undefined ? { note } : {}),
+            ...(collectedAt !== undefined ? { collectedAt } : {}),
+            ...(clientRef !== undefined ? { clientRef } : {}),
+          },
+          ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        });
+      },
+      async void({ tripRef, id, ifMatch, reason }) {
+        return request<Collection>({
+          method: 'DELETE',
+          path: collectionsPath(tripRef, `/${encodeURIComponent(id)}/void`),
+          body: { reason },
+          ifMatch,
+        });
+      },
+    },
+    files: {
+      async requestUpload({ purpose, tripRef, contentType, sizeBytes }) {
+        return request<FileUploadSlot>({
+          method: 'POST',
+          path: '/api/v1/files',
+          body: { purpose, tripRef, contentType, sizeBytes },
+        });
+      },
+      async confirm({ fileId }) {
+        return request<FileRecord>({
+          method: 'POST',
+          path: `/api/v1/files/${encodeURIComponent(fileId)}/confirm`,
+          body: {},
+        });
+      },
+      async read({ fileId }) {
+        return request<FileRecord>({
+          method: 'GET',
+          path: `/api/v1/files/${encodeURIComponent(fileId)}`,
+        });
+      },
+      async readUrl({ fileId }) {
+        return request<{ url: string; expiresAt: string }>({
+          method: 'GET',
+          path: `/api/v1/files/${encodeURIComponent(fileId)}/url`,
+        });
       },
     },
     request,
