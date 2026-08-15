@@ -9,7 +9,7 @@
 
 Today, a partner CRM holding an API key can run the entire server-side trip lifecycle for real: create/upsert trips and managers, push manifests and balances, read and write itinerary/rooming/seating/pickups/treks/checklists, log expenses and collections, move float, upload files, and receive/replay webhook deliveries — all through typed `kaafil-js` methods with retries, idempotency, and token rotation handled for it. That is a genuinely complete backend integration surface.
 
-What it cannot do: run any of that same on-ground write work from a **browser** session — the `KaafilClient` entry point a manager or agency-admin device would use exposes only two of eleven reachable resource groups (`vendors`, `journey`), so a real manager PWA has no SDK path to tick a checklist item, assign a bed, or log an expense and must hand-roll raw HTTP itself (the repo's own `on-ground/client.ts` is that hand-roll, built and documented as a stopgap). It also cannot let a traveller open a share link at all — the fetch/read endpoint for a minted share token doesn't exist in the shipped contract, nor does any form of write-back (pre-trip details, waivers, post-trip feedback). Administrative self-service — minting/rotating its own API keys, registering a webhook receiver, toggling its own entitlement flags — is deliberately console-only and will never be API-key-driven; that's a designed human-in-the-loop boundary, not a bug. Several post-trip modules (closing-day, DSAR erasure/export, feedback/NPS, vendor ratings) are designed on paper but have zero endpoints yet. And the SDK itself isn't installable from a real package registry today — it only exists as a sibling-checkout symlink inside this monorepo.
+What it cannot do: run any of that same on-ground write work from a **browser** session — the `KaafilClient` entry point a manager or agency-admin device would use exposes only two of eleven reachable resource groups (`vendors`, `journey`), so a real manager PWA has no SDK path to tick a checklist item, assign a bed, or log an expense and must hand-roll raw HTTP itself (the repo's own `on-ground/client.ts` is that hand-roll, built and documented as a stopgap). It also cannot let a traveller open a share link at all — the fetch/read endpoint for a minted share token doesn't exist in the shipped contract, nor does any form of write-back (pre-trip details, waivers, post-trip feedback). Administrative self-service — minting/rotating its own API keys, registering a webhook receiver, toggling its own entitlement flags — is deliberately console-only and will never be API-key-driven; that's a designed human-in-the-loop boundary, not a bug. Several post-trip modules (closing-day, DSAR erasure/export, feedback/NPS, vendor ratings) are designed on paper but have zero endpoints yet. The SDK itself is now installable from npm (`kaafil-js@0.1.0-beta.0`, published 2026-08-15) — see "Closed since this audit" below.
 
 ---
 
@@ -41,7 +41,6 @@ Sorted P0 → P3. "Lands in" cites `implementation-plan/README.md`'s phase table
 | `usage-ingest-log-doc-mismatch` | A CRM cannot programmatically check its own usage or ingest log ("did my push land, and if not why?") — both are `consoleAuth`-only, contradicting the architecture doc that promises API-key access | crm-backend | `openapi.json`: `readUsage`, `readIngestLog` both `security: [{"consoleAuth":[]}]`; `architecture/13-operations.md §4.2` documents `readIngestLog` as "API-key auth" — the shipped contract is stricter than the design doc | a human reads it in the partner console | shipped (Phase 08D, closed) — the architecture doc was never reconciled to match |
 | `closing-day-unbuilt` | Blockers, close-out lock, and closing pack have no endpoints | crm-backend | `implementation-plan/README.md:42` — Phase 14 not started; no closing-day path in `openapi.json` | manual close-out outside the platform | phase 14 |
 | `dsar-erasure-export-unbuilt` | Traveller erasure and DSAR export are documented but not in the shipped contract | crm-backend | `architecture/11-data-protection.md:31,54` documents `POST /travellers/:ref/erase` and `GET /travellers/:ref/export`; neither exists in `openapi.json` (only the upsert does) | none — a CRM cannot honor a DPDP request through Kaafil today | phase 17 |
-| `sdk-not-published-anywhere` | `kaafil-js` isn't installable from npm — no real external team can add it as a normal dependency | sdk-ergonomics | `npm view kaafil-js` returns a live 404; the examples repo depends on it via `link:../kaafil-js`; `.github/workflows/publish.yml` requires an `NPM_TOKEN` secret that isn't configured and only fires on a `v*` tag that has never been pushed | clone `kaafil-js` directly and `npm link` it, or build `dist/` and copy it by hand | unscheduled |
 | `agency-admin-upsert-no-sdk-method` | No SDK method wraps `upsertAgencyAdmin` — the one `apiKeyAuth`-satisfiable operation the SDK doesn't expose | sdk-ergonomics | No `upsertAgencyAdmin` export anywhere in `resources/*.ts`; operation is `apiKeyAuth` per `openapi.json:10899-10901` | call it over raw REST with the API key and a hand-built `Idempotency-Key`, then mint the session through the SDK as normal — documented at `managers-and-agency-admins.mdx:117-131` | unscheduled |
 | `agency-settings-endpoint-nonexistent` | `GET/PATCH /api/v1/agencies/:ref/settings` (rooming policy, overpay policy, receipt threshold) is documented but doesn't exist in the spec | crm-backend | `architecture/14-configuration.md §5` documents it as "partner key or console session"; no such path exists in `openapi.json` | an agency runs correctly on hard-coded defaults; only customization is unavailable | unscheduled |
 | `no-vendor-ingest-endpoint` | Vendor directory has no writable surface — `POST /api/v1/vendors` (or assign/swap) doesn't exist; only a read (`listTripVendors`) does | crm-backend | `modules/vendors/FRD.md`: `Status: Planned`; `openapi.json` has exactly one vendor path, read-only | none — vendors is an optional capability-gated module, nothing breaks running a trip without it | unscheduled |
@@ -50,10 +49,24 @@ Sorted P0 → P3. "Lands in" cites `implementation-plan/README.md`'s phase table
 | `no-signature-verification-helper` | No first-party helper to verify `X-Kaafil-Signature` on a received webhook | sdk-ergonomics | `grep` across `kaafil-js/src/` for hmac/verify/signature returns nothing; portal tells integrators to "verify whichever your library supports" | hand-roll HMAC-SHA256 over `${eventId}.${unixSeconds}.${rawBody}`, or adopt a generic Standard-Webhooks library | unscheduled |
 | `testing-sandbox-entirely-unbuilt` | No accelerated test clock, no one-call fixture generator, no webhook test-event trigger | crm-backend | `architecture/12-testing-sandbox.md:6` — `Status: Planned`; no test/fixture/advance-time path anywhere in `openapi.json` | wait in real wall-clock time and hand-build fixture trips through the ordinary ingest endpoints | unscheduled |
 | `ratelimit-visibility-reactive-only` | `X-RateLimit-*` headers ship only on the `429` response, never on a success — no way to see remaining quota before being throttled | crm-backend | Checked per-operation `responses.200.headers` vs `responses.429.headers` in `openapi.json`: only `429` carries them; the closest read, `GET /api/v1/usage`, is console-only | back off reactively only after a `429`, reading `Retry-After` | unscheduled |
-| `sdk-default-baseurl-fictitious` | `kaafil-js`'s compiled-in default base URLs (`api.kaafil.com` / `api.test.kaafil.com`) don't match the one real documented host (`engine.kaafil.in`), and split by environment when the real architecture is one host, key-scoped | sdk-ergonomics | `kaafil-js/src/config.ts:21-32` header admits these are "this SDK's own placeholder convention, not a fact lifted from the engine"; `environments.mdx:58-70` names the real host and titles its callout "Always pass `baseUrl`" | always pass `baseUrl` explicitly at construction; omitting it fails silently against a nonexistent domain | unscheduled |
 | `no-offline-outbox` (blob lane) | Receipt photos captured offline have no "enqueue now, upload opportunistically" path | manager-device | Same absence as the row above — no blob lane exists anywhere in `src/`; the only presigned-upload demo (`on-ground/upload.ts`) is synchronous and online-only | build the enqueue/upload/back-fill sequence by hand on top of the raw presigned-upload flow | phase 15 |
 
 **P3:** none evidenced. Nothing surviving verification was purely cosmetic.
+
+### Closed since this audit
+
+- **`sdk-not-published-anywhere` (P1) — CLOSED 2026-08-15, by `kaafil-js@0.1.0-beta.0`.** `kaafil-js` is
+  now on the real npm registry with both entry points (`.` and `./client`) and their types shipped.
+  `kaafil-js-examples/package.json` depends on it as a pinned `"0.1.0-beta.0"` (not a range — a beta
+  series shouldn't float), installed with a plain `pnpm install`. No sibling checkout, no `npm link`, no
+  vendored copy.
+  **Dist-tag wrinkle an integrator needs to know:** the package's first publish (`0.1.0-beta.0`)
+  permanently claimed the `latest` tag — npm always does this on a first publish, regardless of `--tag`.
+  Every publish since has moved only `beta` forward (currently `0.1.0-beta.1`); `latest` is still stuck on
+  the older `0.1.0-beta.0`. A plain `npm install kaafil-js` (no version, no tag) therefore installs the
+  **older, buggier** version right now, not the newest beta. That will resolve once an actual stable
+  version publishes and moves `latest` forward; until then, pin the exact version rather than trusting an
+  unqualified install or a floating range.
 
 ---
 
@@ -85,11 +98,6 @@ No endpoint exists for blockers, close-out lock, or the closing pack. `implement
 
 ### P1 — `dsar-erasure-export-unbuilt`
 `architecture/11-data-protection.md:31,54` documents `POST /travellers/:ref/erase` and `GET /travellers/:ref/export`, explicitly assigning DSAR handling to the CRM ("Erasure and access requests are fielded by the CRM and executed against Kaafil through the APIs in §2–§3") — but neither endpoint exists; only the traveller-profile upsert does. Phase 17 is not started. There is no workaround — a CRM cannot honor a DPDP erasure/export request through Kaafil at all today.
-
-### P1 — `sdk-not-published-anywhere`
-`npm view kaafil-js` 404s against the real registry. The examples repo's own `package.json` depends on it via `"kaafil-js": "link:../kaafil-js"` with a comment admitting "kaafil-js is not published to npm yet." The publish workflow (`kaafil-js/.github/workflows/publish.yml`) only fires on a `v*` tag push and needs an `NPM_TOKEN` secret that isn't configured — neither precondition has been met.
-
-**Workaround shape:** `git clone` the `kaafil-js` repo alongside your own project and `npm link` it (or build `dist/` and copy the output by hand) — not viable for a real external team outside this monorepo.
 
 ---
 
@@ -161,5 +169,3 @@ with their phase, not as greyed-out method tabs:
 - **webhook endpoint registration, API key lifecycle, agency entitlement writes, usage + ingest log** —
   all `consoleAuth`. Boundary `B1`, never coming to a partner credential.
 - **no HMAC signature-verification helper** ships in `kaafil-js` — an integrator hand-rolls it.
-- **`kaafil-js` is not on npm**, and its compiled-in default base URLs are placeholders — always pass
-  `baseUrl`.

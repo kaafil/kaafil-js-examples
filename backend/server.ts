@@ -28,7 +28,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { Environment, isKaafilError, isRetryable, Kaafil } from 'kaafil-js';
+import { Environment, isKaafilError, isRetryable, Kaafil, resolveBaseUrl } from 'kaafil-js';
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -36,6 +36,11 @@ import { Environment, isKaafilError, isRetryable, Kaafil } from 'kaafil-js';
 
 const KAAFIL_API_KEY = process.env.KAAFIL_API_KEY;
 const KAAFIL_AGENCY_REF = process.env.KAAFIL_AGENCY_REF;
+// Deliberately undocumented in .env.example/README: the one real engine host
+// (https://engine.kaafil.in) is the correct default for every real
+// deployment, and no integrator should be told to configure this. The
+// override still works, unadvertised, for self-hosted/local-engine
+// development.
 const KAAFIL_BASE_URL = process.env.KAAFIL_BASE_URL;
 const PORT = Number.parseInt(process.env.PORT ?? '4000', 10);
 const PLAYGROUND_ORIGIN = process.env.PLAYGROUND_ORIGIN ?? 'http://localhost:5173';
@@ -81,20 +86,12 @@ const kaafil = new Kaafil({
   ...(KAAFIL_BASE_URL !== undefined ? { baseUrl: KAAFIL_BASE_URL } : {}),
 });
 
-// The same default-per-environment fallback `resolveBaseUrl` applies inside
-// `Kaafil`'s own constructor above — recomputed here (not re-exported by
-// `kaafil-js`) purely so `/session` can hand the browser the REAL engine host
-// it should call directly for manager-lane traffic (on-ground writes, and
-// `kaafil-js/client`'s `journey`/`vendors` groups). Per GAPS.md's
-// `sdk-default-baseurl-fictitious` entry, these per-environment defaults are
-// this SDK's own placeholder convention, not a documented production host —
-// `KAAFIL_BASE_URL` is what actually matters in any real deployment, and it
-// wins here exactly as it wins in the constructor above.
-const ENGINE_BASE_URL_DEFAULTS: Record<Environment, string> = {
-  live: 'https://api.kaafil.com',
-  test: 'https://api.test.kaafil.com',
-};
-const engineBaseUrl = KAAFIL_BASE_URL ?? ENGINE_BASE_URL_DEFAULTS[environment];
+// The same default-per-environment fallback (`Kaafil`'s own constructor,
+// via the SDK's exported `resolveBaseUrl` rather than a locally duplicated
+// map) applies above — recomputed here purely so `/session` can hand the
+// browser the same host to call directly for manager-lane traffic
+// (on-ground writes, and `kaafil-js/client`'s `journey`/`vendors` groups).
+const engineBaseUrl = KAAFIL_BASE_URL ?? resolveBaseUrl(environment);
 
 // ---------------------------------------------------------------------------
 // The /sdk allowlist

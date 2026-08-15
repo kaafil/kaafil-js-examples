@@ -94,7 +94,7 @@ response is a real read.
 ## Running it
 
 ```
-cp .env.example .env   # fill in KAAFIL_API_KEY, KAAFIL_AGENCY_REF, KAAFIL_BASE_URL
+cp .env.example .env   # fill in KAAFIL_API_KEY, KAAFIL_AGENCY_REF
 pnpm run backend       # http://localhost:4000
 ```
 

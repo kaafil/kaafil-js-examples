@@ -32,7 +32,7 @@
  * This file is both a tutorial and a CI gate. Every step prints what it is
  * about to do, then asserts the result with `assertTrue`/`assertEquals`
  * below — a step that can't be verified is a failing step, never a silently
- * skipped one. Run it with `pnpm simulate` after `pnpm link:local` and a
+ * skipped one. Run it with `pnpm simulate` after `pnpm install` and a
  * populated `.env` (see `.env.example`); it needs a live `kaafil-engine`
  * with its background worker running, because step 5 waits on that worker and
  * step 21 waits on the coalescer's flush job. Step 43 needs a reachable
@@ -60,6 +60,7 @@ import {
   ManagerRole,
   ManifestMode,
   PartyKind,
+  resolveBaseUrl,
   TripMode,
   UnsatisfiableSchemeError,
 } from 'kaafil-js';
@@ -223,7 +224,6 @@ async function main(): Promise<void> {
     1,
     'Read config from env and construct the client',
     async () => {
-      const configuredBaseUrl = requireEnv('KAAFIL_BASE_URL');
       const configuredApiKey = requireEnv('KAAFIL_API_KEY');
       const configuredAgencyRef = requireEnv('KAAFIL_AGENCY_REF');
 
@@ -235,6 +235,13 @@ async function main(): Promise<void> {
       const configuredEnvironment: 'live' | 'test' = configuredApiKey.startsWith('kf_live_')
         ? 'live'
         : 'test';
+
+      // `KAAFIL_BASE_URL` is deliberately undocumented in .env.example — the
+      // one real engine host is the correct default for every real run of
+      // this script, and no integrator should be told to configure it. The
+      // override still works, unadvertised, for self-hosted/local-engine
+      // development.
+      const configuredBaseUrl = process.env.KAAFIL_BASE_URL ?? resolveBaseUrl(configuredEnvironment);
 
       console.log(`  environment=${configuredEnvironment} baseUrl=${configuredBaseUrl}`);
       return {
@@ -249,7 +256,7 @@ async function main(): Promise<void> {
   const kaafil = new Kaafil({
     apiKey,
     environment,
-    baseUrl, // a local/self-hosted engine is never at the environment's public default
+    baseUrl, // only ever differs from the SDK's own default when KAAFIL_BASE_URL is set
     // The SDK's default retry ladder runs to roughly an hour over 24 attempts.
     // Fine for a long-lived server process; fatal for a script or a CI job,
     // which needs to fail within seconds, not minutes.
