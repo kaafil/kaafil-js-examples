@@ -75,16 +75,22 @@ consequence is that the engine's `CORS_ORIGIN` must allowlist `http://localhost:
 there is indistinguishable from the network being down — if the manager half of the playground dies at
 preflight, check `CORS_ORIGIN` before anything else.
 
-**R7 — `kaafil-js` resolves as a pinned exact version (`"0.1.0-beta.1"`) from the real npm registry**,
+**R7 — `kaafil-js` resolves as a pinned exact version (`"0.1.0-beta.2"`) from the real npm registry**,
 not a range. `pnpm install` alone is the whole setup — no sibling checkout, no `npm link`, no vendored
 copy. Pin exact through the beta series (a floating `^0.1.0-beta.x` range is how this repo would silently
 break on a beta bump); only move to a caret range once `kaafil-js` cuts an actual stable (non-`-beta`)
 release. Note npm's dist-tag wrinkle, still live: the package's first-ever publish (`0.1.0-beta.0`)
 permanently claimed `latest` (npm always does this on a first publish, regardless of `--tag`), and every
-publish since has moved only `beta` forward — `beta` now points at `0.1.0-beta.1`, but `latest` is still
+publish since has moved only `beta` forward — `beta` now points at `0.1.0-beta.2`, but `latest` is still
 stuck on the older `0.1.0-beta.0`. An unqualified `npm install kaafil-js` therefore installs the **older**
 version, with the base-URL default bug this repo's own base URL now avoids by pinning exact. This only
 resolves once an actual stable version publishes and moves `latest` forward.
+
+**As of 2026-08-15 the local `kaafil-js` source is again slightly AHEAD of published `beta.2`** — by
+type-only additions: `423 LOCKED` is now declared on the four `forms` write operations (two manager, two
+share) after the close-out lock landed on them (`D-176`). Nothing runtime changed — the SDK already
+classifies `423` as fatal/park repo-wide, independently of any per-operation declaration — so this repo
+needs no republish to work. Fold it into the next beta rather than cutting one for it.
 
 **R8 — `packageManager` and `.nvmrc` are pinned** (pnpm, Node 20.11.1; `engines` requires >=20.11). Do not
 bump either as a side effect of another change.
