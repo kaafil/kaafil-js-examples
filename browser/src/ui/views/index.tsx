@@ -33,6 +33,43 @@ interface ViewsProps {
 // this component's responsibility, not MethodScreen's — the card only
 // exists when hasView is true.
 export function Views({ v }: ViewsProps) {
+  // `viewmodel.ts`'s `viewVals()` wraps its own view-selection logic in a
+  // try/catch (see that file's own header comment on why: it runs inside
+  // `renderVals()`, called at the top of `App()`'s function body, before any
+  // JSX — a bug there is not a React render exception at all by the time it
+  // would reach a component, and no error boundary around this component
+  // could ever catch it). `v.viewCrashed` is what that catch hands back:
+  // render the same inline "this view broke, the rest of the screen didn't"
+  // message `ui/ErrorBoundary.tsx` shows for an actual render exception, so
+  // the two failure paths read as one consistent design language rather
+  // than two different fallback UIs for what is, to a user, the same kind
+  // of bug.
+  if (v.viewCrashed) {
+    return (
+      <div
+        style={s(
+          'display:flex;flex-direction:column;gap:9px;padding:13px 15px;background:#fff;border:1px solid #eae8e6;border-left:3px solid #b3312f;border-radius:10px;box-shadow:0 1px 2px rgba(25,25,25,.05)',
+        )}
+      >
+        <span style={s("font:600 9.5px/1.6 'Geist Mono',monospace;letter-spacing:.1em;color:#b3312f")}>
+          RENDER ERROR
+        </span>
+        <span style={s('font-size:13px;line-height:1.6;color:#3f3f3f')}>
+          This result view hit a bug while rendering and could not draw itself. This is a display
+          bug in the playground, not a verdict on your request — check the RESPONSE panel for
+          what the engine actually answered. Parameters, the call log and the response are all
+          unaffected.
+        </span>
+        <pre
+          style={s(
+            "margin:0;padding:9px 10px;border-radius:7px;background:#fafaf9;border:1px solid #eae8e6;font:500 12px/1.6 'Geist Mono',monospace;color:#b3312f;white-space:pre-wrap;word-break:break-word",
+          )}
+        >
+          {v.viewCrashed.name}: {v.viewCrashed.message}
+        </pre>
+      </div>
+    );
+  }
   if (!v.hasView) return null;
   return (
     <div

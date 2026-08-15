@@ -191,6 +191,39 @@ export function setBackendUrl(url: string): void {
   _backendUrl = url.trim() || DEFAULT_BACKEND_URL;
 }
 
+/** Reads the real `externalAgencyId` off `backend/server.ts`'s own `GET
+ * /health` route (which already answers `{agencyRef}` for exactly this
+ * reason — it's the one value `KAAFIL_AGENCY_REF` sets at boot). The
+ * browser has no session-level field carrying this and no way to invent a
+ * correct one — any screen that needs an `externalAgencyId` for a live
+ * call (`trips.upsert`, `trips.manager`, `journey.triggers.list`) resolves
+ * it here rather than fabricating a placeholder that only coincidentally
+ * matches a genuinely empty tenant and never matches a seeded one. Not
+ * cached beyond one call: a demo screen re-fetching a one-line health
+ * check is cheaper than a second module-level cache to keep in sync with
+ * `setBackendUrl`. */
+export async function resolveAgencyRef(): Promise<string> {
+  const url = `${backendUrl()}/health`;
+  let body: unknown;
+  try {
+    const res = await fetch(url);
+    body = await res.json();
+    if (typeof (body as { agencyRef?: unknown })?.agencyRef === 'string') {
+      return (body as { agencyRef: string }).agencyRef;
+    }
+  } catch {
+    // falls through to the thrown error below
+  }
+  throw new TransportError({
+    name: 'TransportError',
+    code: null,
+    status: null,
+    message: `${url} did not answer with {agencyRef} — this call cannot resolve its externalAgencyId without it.`,
+    details: null,
+    retryable: 'no',
+  });
+}
+
 // ---------------------------------------------------------------------------
 // sdkCall — the API-key lane, proxied through backend/server.ts's /sdk
 // ---------------------------------------------------------------------------
@@ -221,7 +254,6 @@ export async function sdkCall(path: string[], args: object): Promise<unknown> {
 // ---------------------------------------------------------------------------
 
 export interface MintSessionInput {
-  readonly tripRef: string;
   readonly managerRef: string;
   readonly ttlSeconds?: number;
 }
@@ -229,9 +261,20 @@ export interface MintSessionInput {
 /** The live session this file holds: the manager token pair AND the real
  * engine base URL `backend/server.ts`'s `/session` route resolved it
  * against (`kaafil-js`'s own `resolveBaseUrl`, the one real engine host) —
- * never a hardcoded constant here. See `engineUrl()` below. */
+ * never a hardcoded constant here. See `engineUrl()` below.
+ *
+ * Deliberately carries no `tripRef` — a manager session is identified by
+ * `managerRef` alone (`mintManagerToken`'s own request schema has no trip
+ * field, and the minted JWT's `sub` claim is the manager id; there is no
+ * trip claim anywhere in it). An earlier revision asked for and stored a
+ * `tripRef` here purely as an illustrative "your own route might want this"
+ * example, but nothing in this reference backend ever read it back for any
+ * real purpose — see `GAPS.md`'s `no-manager-scoped-client-call` entry for
+ * the one place a trip ref is still genuinely needed (proving a real call
+ * through `KaafilClient`, which currently exposes only trip-scoped
+ * methods) — that need now lives on the screen that actually has it
+ * (`session.rotate`/`session.probe`'s own params), not here. */
 export interface LiveSession {
-  readonly tripRef: string;
   readonly managerRef: string;
   readonly accessToken: string;
   readonly refreshToken: string;
@@ -282,7 +325,7 @@ function sessionRequiredError(action: string): TransportError {
   });
 }
 
-/** POSTs `{tripRef, managerRef, ttlSeconds?}` to `${backendUrl()}/session`
+/** POSTs `{managerRef, ttlSeconds?}` to `${backendUrl()}/session`
  * (`kaafil.auth.mintManagerToken` under the hood — see `backend/README.md`),
  * stores the resulting token pair + resolved engine `baseUrl`, and persists
  * it to `sessionStorage`. Invalidates any previously built `managerClient`/
@@ -318,7 +361,6 @@ export async function mintSession(input: MintSessionInput): Promise<LiveSession 
     });
   }
   const session: LiveSession = {
-    tripRef: input.tripRef,
     managerRef: input.managerRef,
     accessToken: payload.accessToken,
     refreshToken: payload.refreshToken,
@@ -422,5 +464,152 @@ export function sdkClient(): KaafilClient {
     },
   });
   _sdkClient = client;
+  return client;
+}
+
+// ---------------------------------------------------------------------------
+// Agency-admin session — the parallel lane to the manager session above.
+// Deliberately its own module-level state (`_adminSession`, its own
+// `sessionStorage` key, its own client) rather than reusing `_session`'s
+// slot: a manager session and an agency-admin session are two independent
+// credential kinds (`managerAuth` vs `agencyAdminAuth`) that can be open at
+// the same time in this playground, mirroring two different real devices.
+// ---------------------------------------------------------------------------
+
+export interface MintAgencyAdminSessionInput {
+  readonly agencyAdminRef: string;
+}
+
+/** The live agency-admin session this file holds — same shape as
+ * `LiveSession`, minus `tripRef`/`managerRef` (an agency-admin session is
+ * agency-wide, not scoped to one manager or trip; see
+ * `MintAgencyAdminTokensRequest`, which carries only `agencyAdminRef`). */
+export interface LiveAdminSession {
+  readonly agencyAdminRef: string;
+  readonly accessToken: string;
+  readonly refreshToken: string;
+  readonly expiresAt: string;
+  readonly baseUrl: string;
+}
+
+const ADMIN_SESSION_STORAGE_KEY = 'kaafil.playground.liveAdminSession';
+
+function persistAdminSession(session: LiveAdminSession | null): void {
+  try {
+    if (session) sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(session));
+    else sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+  } catch {
+    // No persistence this reload — see `persistSession`'s identical note.
+  }
+}
+
+function loadPersistedAdminSession(): LiveAdminSession | null {
+  try {
+    const raw = sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as LiveAdminSession) : null;
+  } catch {
+    return null;
+  }
+}
+
+let _adminSession: LiveAdminSession | null = loadPersistedAdminSession();
+let _adminSdkClient: KaafilClient | null = null;
+
+function adminSessionRequiredError(action: string): TransportError {
+  return new TransportError({
+    name: 'SessionRequiredError',
+    code: null,
+    status: null,
+    message:
+      `${action} needs an open agency-admin session and none is open yet. Mint one first (the ` +
+      'session screen\'s "Mint admin session" button, or `mintAgencyAdminSession()`) — this is a ' +
+      'real answer, not a stand-in for one.',
+    details: null,
+    retryable: 'no',
+  });
+}
+
+/** POSTs `{agencyAdminRef}` to `${backendUrl()}/agency-admin-session`
+ * (`kaafil.auth.mintAgencyAdminToken` under the hood — mirrors `mintSession`
+ * above), stores the resulting token pair + resolved engine `baseUrl`, and
+ * persists it to `sessionStorage` under its own key. Invalidates any
+ * previously built `adminSdkClient()` so the next call rebuilds against the
+ * new session. */
+export async function mintAgencyAdminSession(
+  input: MintAgencyAdminSessionInput,
+): Promise<LiveAdminSession & { readonly meta: unknown }> {
+  const url = `${backendUrl()}/agency-admin-session`;
+  const { ok, status, body } = await fetchJson(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!ok) {
+    const errorBody = (body as { error?: SerializedError } | null)?.error;
+    throw rebuildError(errorBody, status);
+  }
+  const payload = body as { accessToken?: string; refreshToken?: string; expiresIn?: number; baseUrl?: string; meta?: unknown };
+  if (!payload.accessToken || !payload.refreshToken || !payload.baseUrl) {
+    throw new TransportError({
+      name: 'TransportError',
+      code: null,
+      status,
+      message: `${url} returned 200 but not the {accessToken, refreshToken, baseUrl} this transport requires.`,
+      details: null,
+      retryable: 'no',
+    });
+  }
+  const session: LiveAdminSession = {
+    agencyAdminRef: input.agencyAdminRef,
+    accessToken: payload.accessToken,
+    refreshToken: payload.refreshToken,
+    expiresAt: new Date(Date.now() + (payload.expiresIn ?? 0) * 1000).toISOString(),
+    baseUrl: payload.baseUrl,
+  };
+  _adminSession = session;
+  _adminSdkClient = null;
+  persistAdminSession(session);
+  return { ...session, meta: payload.meta ?? null };
+}
+
+/** Drops the held agency-admin session (and any client built from it) and
+ * clears the persisted copy — the agency-admin analogue of `closeSession`. */
+export function closeAdminSession(): void {
+  _adminSession = null;
+  if (_adminSdkClient) {
+    try {
+      _adminSdkClient.close();
+    } catch {
+      // Already closed, or never successfully opened.
+    }
+  }
+  _adminSdkClient = null;
+  persistAdminSession(null);
+}
+
+export function currentAdminSession(): LiveAdminSession | null {
+  return _adminSession;
+}
+
+/** A lazily-built `KaafilClient` with the agency-admin session opened via
+ * `client.admin.open(...)` — the agency-admin analogue of `sdkClient()`.
+ * Throws `SessionRequiredError` if no agency-admin session is open. */
+export function adminSdkClient(): KaafilClient {
+  if (!_adminSession) throw adminSessionRequiredError('An agency-admin (admin.open) call');
+  if (_adminSdkClient) return _adminSdkClient;
+
+  const session = _adminSession;
+  const client = new KaafilClient({ environment: 'test', baseUrl: session.baseUrl });
+  client.admin.open({
+    accessToken: session.accessToken,
+    refreshToken: session.refreshToken,
+    expiresAt: session.expiresAt,
+    onRefresh: (result) => {
+      if (!_adminSession) return; // closeAdminSession() ran mid-flight; drop the rotation.
+      _adminSession = { ..._adminSession, ...result };
+      persistAdminSession(_adminSession);
+    },
+  });
+  _adminSdkClient = client;
   return client;
 }

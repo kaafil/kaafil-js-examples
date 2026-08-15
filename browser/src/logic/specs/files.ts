@@ -15,12 +15,14 @@
 // Two real-shape facts drive the rest: the real `purpose` enum
 // (`expense_receipt|form_attachment|booking_voucher`) has no exact match for
 // the sim's `CHECKLIST_PROOF`/`TICKET_ATTACHMENT` — mapped to the closest
-// real value, never invented as a new one; and `files.request` needs a
-// `tripRef` the sim's own params never collect for this screen — taken from
-// the OPEN SESSION (the same `tripRef` `mintSession` was called with), never
-// guessed. `../live/lane.ts`'s header covers the shared envelope contract.
+// real value, never invented as a new one; and `files.request` needs a real
+// `tripRef` (`requestFileUpload`'s own required field) — this screen's own
+// param now, never pulled off the session: a manager session carries no
+// `tripRef` at all (it's identified by `managerRef` alone; see
+// `../live/transport.ts`'s `LiveSession` header). `../live/lane.ts`'s header
+// covers the shared envelope contract.
 
-import { sdkCall, managerClient, currentSession } from '../live/transport';
+import { sdkCall, managerClient } from '../live/transport';
 import { toFail } from '../live/lane';
 
 const PURPOSE_TO_REAL: Record<string, string> = {
@@ -33,10 +35,10 @@ export const filesSpecs = (c: any) => ({
   'files.request': {
     lane: 'D', view: 'files',
     note: 'Size, content types and URL lifetime are wire contract, not per-agency knobs: 10 MB, five types, fifteen minutes. Per-agency variance would fragment every SDK blob lane built against them.',
-    p: [{ n: 'contentType', l: 'contentType', k: 'sel', v: 'image/jpeg', o: ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'application/pdf', 'image/gif'] }, { n: 'sizeBytes', l: 'sizeBytes', k: 'num', v: 2400000 }, { n: 'purpose', l: 'purpose', k: 'sel', v: 'EXPENSE_RECEIPT', o: ['EXPENSE_RECEIPT', 'CHECKLIST_PROOF', 'TICKET_ATTACHMENT'] }],
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'text' }, { n: 'contentType', l: 'contentType', k: 'sel', v: 'image/jpeg', o: ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'application/pdf', 'image/gif'] }, { n: 'sizeBytes', l: 'sizeBytes', k: 'num', v: 2400000 }, { n: 'purpose', l: 'purpose', k: 'sel', v: 'EXPENSE_RECEIPT', o: ['EXPENSE_RECEIPT', 'CHECKLIST_PROOF', 'TICKET_ATTACHMENT'] }],
     errs: [{ l: 'a .gif → 422', patch: { contentType: 'image/gif' } }, { l: '18 MB → 422', patch: { sizeBytes: 18000000 } }],
-    req: (p: any) => ['POST', '/api/v1/files', { purpose: PURPOSE_TO_REAL[p.purpose] || 'expense_receipt', tripRef: currentSession()?.tripRef ?? '(open a session first)', contentType: p.contentType, sizeBytes: Number(p.sizeBytes) }],
-    snip: (p: any) => `const { data } = await post('/files', {\n  purpose: '${PURPOSE_TO_REAL[p.purpose] || 'expense_receipt'}', tripRef, contentType: '${p.contentType}', sizeBytes: ${p.sizeBytes},\n});\nawait fetch(data.uploadUrl, { method: 'PUT', body: blob });   // straight to storage\nawait post('/files/' + data.fileId + '/confirm', {});         // then confirm`,
+    req: (p: any) => ['POST', '/api/v1/files', { purpose: PURPOSE_TO_REAL[p.purpose] || 'expense_receipt', tripRef: p.tripRef || '(paste a real tripRef)', contentType: p.contentType, sizeBytes: Number(p.sizeBytes) }],
+    snip: (p: any) => `const { data } = await post('/files', {\n  purpose: '${PURPOSE_TO_REAL[p.purpose] || 'expense_receipt'}', tripRef: '${p.tripRef}', contentType: '${p.contentType}', sizeBytes: ${p.sizeBytes},\n});\nawait fetch(data.uploadUrl, { method: 'PUT', body: blob });   // straight to storage\nawait post('/files/' + data.fileId + '/confirm', {});         // then confirm`,
     run: (p: any) => {
       const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'application/pdf'];
       if (allowed.indexOf(p.contentType) === -1) return c.fail('KaafilValidationError', 'VALIDATION_ERROR', 422, p.contentType + ' is not in the closed list. Allowed: ' + allowed.join(', ') + '. A closed list is what lets every consumer skip its own sniffing.', { fields: { contentType: 'unsupported' } });
@@ -63,14 +65,13 @@ export const filesSpecs = (c: any) => ({
     // below, named, never swallowed into a fabricated "confirmed".
     live: async (p: any) => {
       try {
-        const tripRef = currentSession()?.tripRef;
-        if (!tripRef) {
-          return { err: { name: 'SessionRequiredError', code: null, status: null, message: 'files.request needs an open manager session for its tripRef — mint one first.', details: null, retryable: 'no' } };
+        if (!String(p.tripRef || '').trim()) {
+          return { err: { name: 'NothingToActOn', code: null, status: null, message: 'files.request needs a real tripRef to upload against — paste one above (a ref you\'ve pushed via trips.upsert).', details: null, retryable: 'no' } };
         }
         const client = managerClient();
         const slot = await client.files.requestUpload({
           purpose: (PURPOSE_TO_REAL[p.purpose] || 'expense_receipt') as any,
-          tripRef, contentType: p.contentType, sizeBytes: Number(p.sizeBytes),
+          tripRef: p.tripRef, contentType: p.contentType, sizeBytes: Number(p.sizeBytes),
         });
         try {
           const putRes = await fetch(slot.data.uploadUrl, {

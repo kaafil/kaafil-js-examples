@@ -16,6 +16,11 @@ export function Params({ v }: { v: any }) {
               <div style={s('display:grid;grid-template-columns:minmax(104px,150px) minmax(0,1fr);gap:14px;align-items:center;padding:9px 0;border-bottom:1px solid #f2f1ef')}>
                 <label style={s("font:500 12px/1.4 'Geist Mono',monospace;color:#3f3f3f")}>{p.l}</label>
                 <span>
+                  {p.hint && (
+                    <div style={s("font:400 11px/1.4 'Geist Mono',monospace;color:#a35a00;margin-bottom:5px")}>
+                      {p.hint}
+                    </div>
+                  )}
                   {p.isText && (
                     <Hov
                       as="input"

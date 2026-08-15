@@ -5,6 +5,7 @@ import { LogRail } from './LogRail.js';
 import { ResponsePanel } from './ResponsePanel.js';
 import { StubCard } from './StubCard.js';
 import { Views } from './views/index.js';
+import { ErrorBoundary } from './ErrorBoundary.js';
 
 // Ported from browser/.design/template.html lines 116-145 (the notGuide
 // wrapper, the lesson tour banner, the note claim strip, and the
@@ -87,7 +88,12 @@ export function MethodScreen({ v }: { v: any }) {
               </div>
             </div>
 
-            <Views v={v} />
+            <ErrorBoundary
+              label={v.viewTitle ? `The "${v.viewTitle}" view` : 'This result view'}
+              onReset={v.reset}
+            >
+              <Views v={v} />
+            </ErrorBoundary>
 
             <LogRail v={v} />
           </>

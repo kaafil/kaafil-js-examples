@@ -4,7 +4,7 @@
 //
 // `live(p)` additions (this job): all four are lane B, apiKeyAuth-satisfiable
 // -> `sdkCall()` through `backend/server.ts`'s `/sdk`. See `../live/lane.ts`.
-import { backendUrl, sdkCall } from '../live/transport';
+import { resolveAgencyRef, sdkCall } from '../live/transport';
 import { okFromSdk, okLive, toFail } from '../live/lane';
 
 /** `journey.triggers.list` is agency-scoped (`GET
@@ -12,29 +12,9 @@ import { okFromSdk, okLive, toFail } from '../live/lane';
  * ONLY method in this file where the vendored spec's path parameter isn't
  * `tripRef` (`kaafil-js/src/resources/journey.ts`'s header comment says so
  * explicitly). This screen has no `agencyRef` param to collect one, and the
- * browser has no session-level field carrying it either — so this reads it,
- * for real, off `backend/server.ts`'s own `GET /health` (which already
- * answers `{agencyRef}` for exactly this reason). Not cached beyond one
- * call: a demo screen re-fetching a one-line health check is cheaper than a
- * second module-level cache to keep in sync with `setBackendUrl`. */
-async function resolveAgencyRef(): Promise<string> {
-  const url = `${backendUrl()}/health`;
-  let body: unknown;
-  try {
-    const res = await fetch(url);
-    body = await res.json();
-    if (typeof (body as { agencyRef?: unknown })?.agencyRef === 'string') {
-      return (body as { agencyRef: string }).agencyRef;
-    }
-  } catch {
-    // falls through to the thrown error below
-  }
-  const err = new Error(`${url} did not answer with {agencyRef} — journey.triggers.list cannot resolve its agency-scoped path without it.`);
-  (err as Error & { code: null; status: null }).code = null;
-  (err as Error & { code: null; status: null }).status = null;
-  err.name = 'TransportError';
-  throw err;
-}
+ * browser has no session-level field carrying it either — so `resolveAgencyRef`
+ * (`../live/transport.ts`) reads it, for real, off `backend/server.ts`'s own
+ * `GET /health`. */
 
 export const journeySpecs = (c: any) => ({
   'journey.get': {
