@@ -109,7 +109,7 @@ export const pickupsSpecs = (c: any) => ({
   },
   'pickups.assign': {
     lane: 'D', view: 'pick', note: 'Assigning a traveller to a stop creates them PENDING — the state every close policy is about.',
-    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'stopId', l: 'stopId', k: 'sel', d: (r: any) => { const k = c.ensurePick(r); return k ? k.stops.map((s: any) => s.id) : ['stp_1']; } }, { n: 'travellerId', l: 'travellerId', k: 'sel', v: 'tvl_05', o: ['tvl_05', 'tvl_06'] }],
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'stopId', l: 'stopId', k: 'sel', d: (r: any) => { const k = c.ensurePick(r); return k ? k.stops.map((s: any) => s.id) : ['stp_1']; } }, { n: 'travellerId', l: 'travellerId', k: 'sel', d: () => c.ROSTER.map((row: any) => row[0]) }],
     req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/pickups/' + p.stopId + '/assign', { travellerId: p.travellerId }],
     snip: (p: any) => `await client.pickups.assign({ stopId: '${p.stopId}', travellerId: '${p.travellerId}' });`,
     run: (p: any) => {

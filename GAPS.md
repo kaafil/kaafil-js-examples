@@ -44,7 +44,6 @@ Sorted P0 → P3. "Lands in" cites `implementation-plan/README.md`'s phase table
 | `closing-day-unbuilt` | Blockers, close-out lock, and closing pack have no endpoints | crm-backend | `implementation-plan/README.md:42` — Phase 14 not started; no closing-day path in `openapi.json` | manual close-out outside the platform | phase 14 |
 | `dsar-erasure-export-unbuilt` | Traveller erasure and DSAR export are documented but not in the shipped contract | crm-backend | `architecture/11-data-protection.md:31,54` documents `POST /travellers/:ref/erase` and `GET /travellers/:ref/export`; neither exists in `openapi.json` (only the upsert does) | none — a CRM cannot honor a DPDP request through Kaafil today | phase 17 |
 | `agency-admin-upsert-no-sdk-method` | No SDK method wraps `upsertAgencyAdmin` — the one `apiKeyAuth`-satisfiable operation the SDK doesn't expose | sdk-ergonomics | No `upsertAgencyAdmin` export anywhere in `resources/*.ts`; operation is `apiKeyAuth` per `openapi.json:10899-10901` | call it over raw REST with the API key and a hand-built `Idempotency-Key`, then mint the session through the SDK as normal — documented at `managers-and-agency-admins.mdx:117-131` | unscheduled |
-| `no-manager-scoped-client-call` | `KaafilClient` (browser entry) exposes exactly two resource groups — `journey` and `vendors` — and both are trip-scoped; there is no manager-only, non-trip-scoped call reachable from the browser SDK at all | sdk-ergonomics | `GET /api/v1/managers/me/notifications` (`listManagerNotifications`) is `managerAuth`-only and genuinely trip-independent per `openapi.json`, but `client-entry.ts` doesn't wire a `notifications` (or similar) group in; a manager session is identified purely by `managerRef` (no trip claim in the minted JWT), yet nothing on this SDK entry can prove that without also naming a trip | none from the browser SDK — `on-ground/client.ts`'s raw `request()` escape hatch could call it directly with the manager bearer, but nothing in this repo does yet | unscheduled |
 | `agency-settings-endpoint-nonexistent` | `GET/PATCH /api/v1/agencies/:ref/settings` (rooming policy, overpay policy, receipt threshold) is documented but doesn't exist in the spec | crm-backend | `architecture/14-configuration.md §5` documents it as "partner key or console session"; no such path exists in `openapi.json` | an agency runs correctly on hard-coded defaults; only customization is unavailable | unscheduled |
 | `no-vendor-ingest-endpoint` | Vendor directory has no writable surface — `POST /api/v1/vendors` (or assign/swap) doesn't exist; only a read (`listTripVendors`) does | crm-backend | `modules/vendors/FRD.md`: `Status: Planned`; `openapi.json` has exactly one vendor path, read-only | none — vendors is an optional capability-gated module, nothing breaks running a trip without it | unscheduled |
 | `feedback-nps-comms-vendor-rating-unbuilt` | Post-trip NPS, engagement-comms provider registration, and vendor ratings are designed but unshipped | crm-backend | `modules/feedback-nps/FRD.md:3`, `engagement-comms/FRD.md:3`, `vendor-rating/FRD.md:3` all `Status: Planned` | none via API | phase 12 (feedback-nps, vendor-rating), phase 13 (engagement-comms) |
@@ -70,6 +69,14 @@ Sorted P0 → P3. "Lands in" cites `implementation-plan/README.md`'s phase table
   **older, buggier** version right now, not the newest beta. That will resolve once an actual stable
   version publishes and moves `latest` forward; until then, pin the exact version rather than trusting an
   unqualified install or a floating range.
+
+- **`no-manager-scoped-client-call` (sdk-ergonomics) — CLOSED 2026-08-15, by `kaafil-js@0.1.0-beta.2`.**
+  `client-entry.ts` now wires `GET /api/v1/managers/me/notifications` (`listManagerNotifications`,
+  `managerAuth`-only, genuinely trip-independent) into `KaafilClient` as `client.notifications.list()` —
+  see `src/resources/notifications.ts`. `session.rotate`/`session.probe` (`kaafil-js-examples`) no longer
+  need any `tripRef` at all: both now prove a real request through the resolver via
+  `notifications.list()` instead of borrowing the trip-scoped `journey.get`.
+  `kaafil-js-examples/package.json` bumped to the pinned `"0.1.0-beta.2"`.
 
 ---
 
