@@ -3,6 +3,7 @@ node_modules/
 dist/
 build/
 .vite/
+browser/.design/
 
 # editor cruft
 .DS_Store
