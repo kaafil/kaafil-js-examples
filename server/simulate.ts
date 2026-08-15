@@ -19,13 +19,28 @@
  * `itinerary`/`rooming` groups, and is refused — locally, before any request —
  * when it tries to write with the wrong credential.
  *
+ * Steps 23-32 add seating, pickup stops and a trek postpone ripple; steps
+ * 33-40 add the trip checklist. Steps 42-48 are the MONEY walkthrough: issue
+ * float, log a FLOAT_CASH expense and replay its Idempotency-Key (one
+ * movement, not two), a receipt through the REAL presigned upload flow,
+ * void the expense back to its starting balance, collect against a
+ * CRM-pushed balance and refuse an overpay, refuse an over-return of float,
+ * and claim a PERSONAL expense through to a CRM claim-status ingest replay.
+ * `kaafil-js` has no `float`/`expenses`/`collections`/`files` resource group
+ * at all, so all four extend `../on-ground/` exactly as itinerary/rooming do.
+ *
  * This file is both a tutorial and a CI gate. Every step prints what it is
  * about to do, then asserts the result with `assertTrue`/`assertEquals`
  * below — a step that can't be verified is a failing step, never a silently
  * skipped one. Run it with `pnpm simulate` after `pnpm link:local` and a
  * populated `.env` (see `.env.example`); it needs a live `kaafil-engine`
  * with its background worker running, because step 5 waits on that worker and
- * step 21 waits on the coalescer's flush job.
+ * step 21 waits on the coalescer's flush job. Step 44 needs a reachable
+ * presigned-upload endpoint — see `.env.example`'s `KAAFIL_STORAGE_LOCAL_PROXY`
+ * and the README's "the presigned upload and this repo's own docker network"
+ * section if the engine runs behind docker-compose. Step 48 needs
+ * `expenses.claims` enabled on the agency — this repo's own seed leaves it
+ * off, and no credential this repo holds can turn it on (see the README).
  */
 
 import {
@@ -62,6 +77,7 @@ import { occupantChip, parseToneToken } from '../on-ground/chip';
 import { createOnGroundClient, OnGroundHttpError } from '../on-ground/client';
 import type { ItineraryItem, ItineraryRead, Occupant, Room, Vehicle } from '../on-ground/types';
 import { isTombstone } from '../on-ground/types';
+import { putPresignedBytes } from '../on-ground/upload';
 
 // ---------------------------------------------------------------------------
 // Tiny local assert helper. No test framework: this script IS the check, and
@@ -2472,11 +2488,538 @@ async function main(): Promise<void> {
     });
     passed++;
 
+    // ===================================================================
+    // Steps 42-48 — the money walkthrough: float, expenses, a receipt
+    // through the REAL presigned upload flow, collections and the
+    // claim-status ingest.
+    //
+    // `kaafil-js` carries NO `float`, `expenses`, `collections` or `files`
+    // resource group at all — not even read-only on the API-key client, the
+    // shape itinerary/rooming/checklists already have. Every write below
+    // (bar one) is `auth: 'manager'` alone, so `on-ground/client.ts` is
+    // extended with four more typed groups rather than a second stand-in
+    // pattern — the same move steps 13-21/23-32/33-40 already made for
+    // itinerary/rooming, seating/pickups/treks and checklists respectively.
+    // The one exception, the claim-status ingest (step 48), is `auth:
+    // 'apiKey'` — the CRM's OWN credential — and is called directly below
+    // with its own small helper, never folded into the manager-session
+    // client.
+    //
+    // All of it runs against `onGroundTripRef` — the same trip steps 12-41
+    // already built a roster, an itinerary, rooms, a fleet and a checklist
+    // onto — rather than a fresh fixture, because float/expenses/collections
+    // are properties of a TRIP a manager is already running, not a new kind
+    // of trip.
+    // ===================================================================
+
     // -------------------------------------------------------------------
-    // Step 41 — close and summarize.
+    // Step 42 — issue float to the manager. `balanceBeforeMinor: 0` is the
+    // claim worth reading twice: this is the FIRST float movement ever
+    // posted for this manager on this trip, so the derived balance the
+    // engine hands back has nothing behind it but this one row.
     // -------------------------------------------------------------------
 
-    await step(41, 'close() the client', async () => {
+    const floatIssueAmountMinor = 40_00_00; // ₹4,000.00 in paise
+
+    const floatAfterIssue = await step(
+      42,
+      'float: issue ₹4,000.00 to the manager — the derived balance starts from zero',
+      async () => {
+        const issued = await onGround.float.issue({
+          tripRef: onGroundTripRef,
+          managerId: managerRef,
+          amountMinor: floatIssueAmountMinor,
+          note: 'Cash handed over at the office before departure',
+        });
+        assertEquals(issued.data.type, 'ISSUE', 'the movement was not typed ISSUE');
+        assertEquals(issued.data.direction, 'IN', 'an ISSUE must be direction IN');
+        assertEquals(issued.data.balanceBeforeMinor, 0, 'a first-ever movement did not start from a zero balance');
+        assertEquals(
+          issued.data.balanceAfterMinor,
+          floatIssueAmountMinor,
+          'the balance after issuing did not equal the amount issued',
+        );
+
+        const summary = await onGround.float.readSummary({ tripRef: onGroundTripRef });
+        const row = summary.data.data.find((r) => r.managerId === managerRef);
+        if (row === undefined) {
+          throw new AssertionFailure('step 42: the manager has no row in the float summary right after issuing');
+        }
+        assertEquals(row.balanceMinor, floatIssueAmountMinor, 'the summary balance disagrees with the issue response');
+        console.log(`  issued ₹${String(floatIssueAmountMinor / 100)} → balanceMinor=${String(row.balanceMinor)}`);
+        return row.balanceMinor;
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 43 — log a FLOAT_CASH expense, then REPLAY the identical
+    // Idempotency-Key. FLOAT_CASH auto-couples to the float ledger in the
+    // SAME transaction (§4.1) — a replay that produced two `Expense` rows
+    // or two `FloatMovement` rows would be the exact double-spend an
+    // idempotency key exists to prevent, and it would be invisible from the
+    // expense response alone (the engine replays the STORED response
+    // verbatim on a key match) — the float summary's `spentMinor` is what
+    // actually proves only one movement landed.
+    // -------------------------------------------------------------------
+
+    const lunchAmountMinor = 1_200_00; // ₹1,200.00
+    const lunchIdempotencyKey = `sim-lunch-${runSuffix}`;
+
+    const lunchExpense = await step(
+      43,
+      'expenses: log a FLOAT_CASH expense, then REPLAY the same Idempotency-Key — exactly ONE movement, not two',
+      async () => {
+        const first = await onGround.expenses.log({
+          tripRef: onGroundTripRef,
+          amountMinor: lunchAmountMinor,
+          category: 'FOOD',
+          paymentMode: 'FLOAT_CASH',
+          description: 'Lunch for the group at the dhaba',
+          idempotencyKey: lunchIdempotencyKey,
+        });
+        assertTrue(first.data.floatMovementId !== null, 'a FLOAT_CASH log did not couple to a float movement');
+        assertEquals(first.data.missingReceipt, true, 'a fresh log with no receipt did not read missingReceipt');
+
+        const replay = await onGround.expenses.log({
+          tripRef: onGroundTripRef,
+          amountMinor: lunchAmountMinor,
+          category: 'FOOD',
+          paymentMode: 'FLOAT_CASH',
+          description: 'Lunch for the group at the dhaba',
+          idempotencyKey: lunchIdempotencyKey,
+        });
+        assertEquals(replay.data.id, first.data.id, 'the replay minted a SECOND Expense row');
+        assertEquals(
+          replay.data.floatMovementId,
+          first.data.floatMovementId,
+          'the replay coupled to a SECOND FloatMovement row',
+        );
+
+        const summary = await onGround.float.readSummary({ tripRef: onGroundTripRef });
+        const row = summary.data.data.find((r) => r.managerId === managerRef);
+        if (row === undefined) {
+          throw new AssertionFailure('step 43: the manager vanished from the float summary');
+        }
+        assertEquals(row.spentMinor, lunchAmountMinor, 'spentMinor moved by more than ONE expense’s amount — a replay double-spent');
+        assertEquals(
+          row.balanceMinor,
+          floatAfterIssue - lunchAmountMinor,
+          'the derived balance did not reflect exactly one EXPENSE(OUT) movement',
+        );
+
+        const ledger = await onGround.float.readLedger({ tripRef: onGroundTripRef, managerId: managerRef });
+        const expenseMovements = ledger.data.data.filter((m) => m.type === 'EXPENSE');
+        assertEquals(expenseMovements.length, 1, 'the ledger carries more than one EXPENSE movement for one logged lunch');
+
+        console.log(
+          `  logged + replayed (Idempotency-Key ${lunchIdempotencyKey}) → ONE expense (${first.data.id}), ` +
+            `ONE float movement (${String(first.data.floatMovementId)}), spentMinor=${String(row.spentMinor)}`,
+        );
+        return first.data;
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 44 — a receipt, through the REAL presigned flow: POST /files →
+    // PUT the bytes to the signed URL → confirm → link it to the expense.
+    // No shortcut through a fake blob or a bare `receiptFileKey` invented by
+    // this file — every byte the engine's own `UPLOAD_MISMATCH` check
+    // inspects (size, leading signature bytes against the declared content
+    // type) has to be genuine, or `confirm` refuses it.
+    // -------------------------------------------------------------------
+
+    const receiptBytes = new Uint8Array(256);
+    // A minimal, genuine JPEG leading signature (FF D8 FF E0) — `confirm`
+    // sniffs these bytes against the declared `contentType` (§4's
+    // `UPLOAD_MISMATCH` check) and a file that is all zeroes fails it.
+    receiptBytes.set([0xff, 0xd8, 0xff, 0xe0]);
+
+    await step(
+      44,
+      'files: the REAL presigned flow — POST /files, PUT the bytes, confirm, then link to the expense',
+      async () => {
+        const slot = await onGround.files.requestUpload({
+          purpose: 'expense_receipt',
+          tripRef: onGroundTripRef,
+          contentType: 'image/jpeg',
+          sizeBytes: receiptBytes.byteLength,
+        });
+        assertTrue(slot.data.uploadUrl.length > 0, 'the upload slot carried no uploadUrl');
+        console.log(`  fileId=${slot.data.fileId} — presigned PUT minted, 900s window`);
+
+        // NOT a Kaafil call — no Kaafil auth header ever rides this request;
+        // the signed URL itself is the authorization (`../on-ground/upload.ts`'s
+        // own header explains the one local-docker wrinkle this needs).
+        await putPresignedBytes(slot.data.uploadUrl, receiptBytes, 'image/jpeg');
+        console.log('  PUT of the actual bytes → object storage accepted them');
+
+        const confirmed = await onGround.files.confirm({ fileId: slot.data.fileId });
+        assertEquals(confirmed.data.status, 'ready', 'confirm did not flip the file to ready');
+        assertEquals(confirmed.data.retentionClass, 'FINANCIAL', 'an expense_receipt did not derive retentionClass FINANCIAL');
+        console.log(`  confirm → status=${confirmed.data.status} retentionClass=${String(confirmed.data.retentionClass)}`);
+
+        const linked = await onGround.expenses.linkReceipt({
+          tripRef: onGroundTripRef,
+          id: lunchExpense.id,
+          receiptFileKey: slot.data.fileId,
+        });
+        assertEquals(linked.data.receiptFileKey, slot.data.fileId, 'the expense did not link the confirmed file');
+        assertEquals(linked.data.missingReceipt, false, 'a linked receipt did not clear missingReceipt');
+        console.log(`  linked to expense ${lunchExpense.id} → missingReceipt=${String(linked.data.missingReceipt)}`);
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 45 — void the expense. A FLOAT_CASH void posts a reversing
+    // `ADJUSTMENT(IN)` in the SAME transaction (§4.1) — the ledger must
+    // therefore net back to EXACTLY the balance step 42's issue produced,
+    // not merely "go up by roughly the right amount".
+    // -------------------------------------------------------------------
+
+    await step(
+      45,
+      'void the expense — the float ledger nets back to exactly where it started, before this expense existed',
+      async () => {
+        const voided = await onGround.expenses.void({
+          tripRef: onGroundTripRef,
+          id: lunchExpense.id,
+          ifMatch: lunchExpense.version,
+          reason: 'Mistyped amount — re-entering correct figure separately',
+        });
+        assertTrue(voided.data.voidedAt !== null, 'the expense did not carry a voidedAt after voiding');
+
+        const summary = await onGround.float.readSummary({ tripRef: onGroundTripRef });
+        const row = summary.data.data.find((r) => r.managerId === managerRef);
+        if (row === undefined) {
+          throw new AssertionFailure('step 45: the manager vanished from the float summary');
+        }
+        assertEquals(
+          row.balanceMinor,
+          floatAfterIssue,
+          'voiding the FLOAT_CASH expense did not net the balance back to its pre-expense figure',
+        );
+        // `spentMinor` itself is untouched (the void is a separate,
+        // reversing ADJUSTMENT row, never a rewrite of history) — only the
+        // DERIVED balance nets out.
+        assertEquals(row.spentMinor, lunchAmountMinor, 'voiding rewrote spentMinor rather than reversing it separately');
+        console.log(
+          `  voided → balanceMinor back to ₹${String(floatAfterIssue / 100)} ` +
+            `(spentMinor still shows ₹${String(row.spentMinor / 100)}, reversed by a separate adjustment, not erased)`,
+        );
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 46 — collect against a balance. The Balance row itself is a CRM
+    // fact, pushed with the api-key client exactly the way a real CRM would
+    // (`kaafil.trips.balance.push`) — collections never derives one from
+    // thin air. The overpay guard is a HARD refusal, not a clamp: it names
+    // the room still left with `details.remainingMinor`.
+    // -------------------------------------------------------------------
+
+    const collectExternalTravellerId = `sim-day-collect-${runSuffix}`;
+    const balanceTotalMinor = 10_000_00; // ₹10,000.00
+    const balanceDueMinor = 6_000_00; // ₹6,000.00 outstanding
+
+    await step(
+      46,
+      'collections: record a payment against a CRM-pushed balance, then an overpay refuses with details.remainingMinor',
+      async () => {
+        const manifestBefore = await kaafil.trips.travellers.pushManifest({
+          tripRef: onGroundTripRef,
+          mode: ManifestMode.Merge,
+          travellers: [],
+        });
+        const manifest = await kaafil.trips.travellers.pushManifest({
+          tripRef: onGroundTripRef,
+          mode: ManifestMode.Merge,
+          travellers: [
+            {
+              externalTravellerId: collectExternalTravellerId,
+              fullName: 'Priya Kapoor',
+              bookingStatus: BookingStatus.Confirmed,
+              sourceUpdatedAt: new Date(),
+            },
+          ],
+        });
+        // `manifestCount` is the trip's TOTAL live roster after this push,
+        // never "how many rows this particular request carried" — a merge
+        // onto an already-populated trip (this one already has six from step
+        // 12) must grow that total by exactly one, not read as `1`.
+        assertEquals(
+          manifest.manifestCount,
+          manifestBefore.manifestCount + 1,
+          'the extra collections traveller did not land on the manifest',
+        );
+
+        await kaafil.trips.balance.push({
+          tripRef: onGroundTripRef,
+          balances: [
+            {
+              travellerRef: collectExternalTravellerId,
+              totalMinor: balanceTotalMinor,
+              dueMinor: balanceDueMinor,
+              sourceUpdatedAt: new Date(),
+            },
+          ],
+        });
+
+        // No SDK-side (or on-ground) way to resolve an external ref to a
+        // Kaafil-internal `travellerId` directly — `collections.listEligible`
+        // is read back INSTEAD, since it is the one call that already
+        // carries the internal id keyed against an outstanding balance. This
+        // is the first balance ever pushed on this trip, so the eligible
+        // list must carry EXACTLY the one row this step just created.
+        const eligible = await onGround.collections.listEligible({ tripRef: onGroundTripRef });
+        assertEquals(eligible.data.length, 1, 'the eligible list did not carry exactly the one balance just pushed');
+        const eligibleRow = eligible.data[0];
+        if (eligibleRow === undefined) {
+          throw new AssertionFailure('unreachable: step 46 already asserted the eligible list has one row');
+        }
+        assertEquals(eligibleRow.outstandingMinor, balanceDueMinor, 'the eligible row does not show the pushed dueMinor as outstanding');
+        const travellerId = eligibleRow.travellerId;
+
+        const partialAmountMinor = 4_000_00; // ₹4,000.00 of the ₹6,000.00 owed
+        const recorded = await onGround.collections.record({
+          tripRef: onGroundTripRef,
+          travellerId,
+          amountMinor: partialAmountMinor,
+          mode: 'UPI',
+          reference: `UPI-SIM-${runSuffix}`,
+        });
+        assertEquals(recorded.data.amountMinor, partialAmountMinor, 'the recorded collection echoed the wrong amount');
+        assertEquals(
+          recorded.data.outstandingMinor,
+          balanceDueMinor - partialAmountMinor,
+          'the recorded collection did not derive the remaining outstanding correctly',
+        );
+        const remainingMinor = balanceDueMinor - partialAmountMinor;
+        console.log(`  collected ₹${String(partialAmountMinor / 100)} of ₹${String(balanceDueMinor / 100)} owed → remaining ₹${String(remainingMinor / 100)}`);
+
+        try {
+          await onGround.collections.record({
+            tripRef: onGroundTripRef,
+            travellerId,
+            amountMinor: remainingMinor + 1_00, // one rupee more than is actually left
+            mode: 'CASH',
+          });
+          throw new AssertionFailure('an overpaying collection was accepted');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) throw err;
+          assertEquals(err.status, 422, 'an overpay should be a 422');
+          assertEquals(err.code, 'BUSINESS_RULE_VIOLATION', 'an overpay should be BUSINESS_RULE_VIOLATION');
+          assertEquals(
+            err.details?.['remainingMinor'],
+            remainingMinor,
+            'the overpay refusal did not name the actual remaining balance in details.remainingMinor',
+          );
+          console.log(
+            `  overpay (₹${String((remainingMinor + 100) / 100)}) refused: 422 BUSINESS_RULE_VIOLATION, ` +
+              `details.remainingMinor=${String(err.details?.['remainingMinor'])}`,
+          );
+        }
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 47 — an over-return of float. The negative-float guard (RULES R4)
+    // applies to `return` exactly as it does to an `ADJUSTMENT(OUT)` — a
+    // refusal names `details.currentBalanceMinor`, the figure the guard
+    // actually compared against, so a client can rebase rather than guess.
+    // -------------------------------------------------------------------
+
+    await step(
+      47,
+      'float: an over-return refuses with details.currentBalanceMinor — the negative-float guard',
+      async () => {
+        const summaryBefore = await onGround.float.readSummary({ tripRef: onGroundTripRef });
+        const rowBefore = summaryBefore.data.data.find((r) => r.managerId === managerRef);
+        if (rowBefore === undefined) {
+          throw new AssertionFailure('step 47: the manager has no float row to over-return against');
+        }
+        const currentBalanceMinor = rowBefore.balanceMinor;
+
+        try {
+          await onGround.float.return({
+            tripRef: onGroundTripRef,
+            managerId: managerRef,
+            amountMinor: currentBalanceMinor + 1_00, // one rupee more than the manager actually holds
+            note: 'Attempting to return more than is left',
+          });
+          throw new AssertionFailure('an over-return of float was accepted');
+        } catch (err) {
+          if (!(err instanceof OnGroundHttpError)) throw err;
+          assertEquals(err.status, 422, 'an over-return should be a 422');
+          assertEquals(err.code, 'BUSINESS_RULE_VIOLATION', 'an over-return should be BUSINESS_RULE_VIOLATION');
+          assertEquals(
+            err.details?.['currentBalanceMinor'],
+            currentBalanceMinor,
+            'the over-return refusal did not name the actual current balance in details.currentBalanceMinor',
+          );
+          console.log(
+            `  over-return (₹${String((currentBalanceMinor + 100) / 100)}) refused: 422 BUSINESS_RULE_VIOLATION, ` +
+              `details.currentBalanceMinor=${String(err.details?.['currentBalanceMinor'])}`,
+          );
+        }
+
+        // The positive control: returning EXACTLY the current balance succeeds
+        // and nets to zero — the guard is a boundary, not a blanket refusal.
+        const returned = await onGround.float.return({
+          tripRef: onGroundTripRef,
+          managerId: managerRef,
+          amountMinor: currentBalanceMinor,
+          note: 'Leftover cash handed back at close-out',
+        });
+        assertEquals(returned.data.balanceAfterMinor, 0, 'returning exactly the current balance did not net to zero');
+        console.log(`  returning exactly ₹${String(currentBalanceMinor / 100)} → balanceAfterMinor=0`);
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 48 — claim a PERSONAL expense, ingest a CRM decision, and replay
+    // it with an EQUAL `crmDecisionAt` to prove the self-heal (R17):
+    // strictly-older is dropped `ignored_stale`, EQUAL is RE-APPLIED, never
+    // merely re-acknowledged as already-done.
+    //
+    // The ingest itself is `auth: 'apiKey'` — the CRM's own credential, never
+    // `managerAuth` — which is why it is called directly here with the
+    // partner API key rather than through `../on-ground/client.ts` (every
+    // write on that client accepts `managerAuth` and only `managerAuth`, by
+    // its own header). `kaafil-js` has no `expenses` resource group at all,
+    // so there is no typed SDK call for this either — a raw `fetch` with
+    // `X-API-Key` is the CRM's own honest stand-in, exactly as
+    // `on-ground/client.ts` is the manager's.
+    // -------------------------------------------------------------------
+
+    interface ClaimStatusIngestErrorEnvelope {
+      readonly error?: { readonly code?: string; readonly message?: string; readonly details?: unknown };
+    }
+
+    async function postClaimStatusIngest(args: {
+      readonly expenseId: string;
+      readonly status: 'APPROVED' | 'PAID' | 'REJECTED';
+      readonly decisionAt: string;
+      readonly paymentReference?: string;
+    }): Promise<{ readonly status: number; readonly body: Record<string, unknown> }> {
+      const response = await fetch(
+        `${baseUrl}/api/v1/trips/${encodeURIComponent(onGroundTripRef)}/expenses/${encodeURIComponent(args.expenseId)}/claim-status`,
+        {
+          method: 'POST',
+          headers: {
+            'X-API-Key': apiKey,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': crypto.randomUUID(),
+          },
+          body: JSON.stringify({
+            status: args.status,
+            decisionAt: args.decisionAt,
+            ...(args.paymentReference !== undefined ? { paymentReference: args.paymentReference } : {}),
+          }),
+        },
+      );
+      const payload = (await response.json().catch(() => ({}))) as ClaimStatusIngestErrorEnvelope & {
+        data?: Record<string, unknown>;
+      };
+      if (!response.ok) {
+        throw new AssertionFailure(
+          `claim-status ingest answered ${String(response.status)} ${String(payload.error?.code)}: ` +
+            `${String(payload.error?.message)}`,
+        );
+      }
+      return { status: response.status, body: payload.data ?? {} };
+    }
+
+    await step(
+      48,
+      'claim a PERSONAL expense, ingest PAID, then replay with an EQUAL crmDecisionAt — RE-APPLIED, not an error',
+      async () => {
+        const idk = `sim-personal-${runSuffix}`;
+        const logged = await onGround.expenses.log({
+          tripRef: onGroundTripRef,
+          amountMinor: 50_000, // ₹500.00
+          category: 'MISC',
+          paymentMode: 'PERSONAL',
+          description: 'Personal taxi, claimed back',
+          idempotencyKey: idk,
+        });
+        assertEquals(logged.data.paymentMode, 'PERSONAL', 'the logged expense was not PERSONAL');
+
+        try {
+          const claimed = await onGround.expenses.submitClaim({ tripRef: onGroundTripRef, id: logged.data.id });
+          assertEquals(claimed.data.claimStatus, 'SUBMITTED', 'submitting a claim did not set claimStatus SUBMITTED');
+          console.log(`  claim submitted on expense ${logged.data.id}`);
+        } catch (err) {
+          if (
+            err instanceof OnGroundHttpError &&
+            err.status === 402 &&
+            err.details?.['flag'] === 'expenses.claims'
+          ) {
+            // A REAL, structural gap this repo cannot work around, not a
+            // shortcut taken here: `expenses.claims` is off on this agency
+            // (this build's own seed deliberately sets it `false`, alongside
+            // several other flags left off on purpose — `prisma/seed.ts`),
+            // and the ONLY route that flips it, `PATCH
+            // /api/v1/agencies/{ref}/entitlement`, is `auth: 'console'` — a
+            // session-cookie credential no partner API key or manager
+            // session can ever present. There is no code path from ANY
+            // credential this repo holds to turn this flag on, which is
+            // exactly the same shape as step 38's "no admin route creates a
+            // template" gap. This step FAILS, naming the cause, rather than
+            // skipping — a step that cannot be verified is a failing step
+            // (this file's own rule, stated at the top), and the failure
+            // IS the finding: see the README's "what this repo cannot do".
+            throw new AssertionFailure(
+              'expenses.claims is OFF on this agency and no credential this repo holds can turn it on ' +
+                '(PATCH /api/v1/agencies/{ref}/entitlement is auth: \'console\' only) — the claim/claim-status ' +
+                'walkthrough cannot be driven end-to-end against this stack. See the README.',
+            );
+          }
+          throw err;
+        }
+
+        const decisionAt = new Date().toISOString();
+        const first = await postClaimStatusIngest({
+          expenseId: logged.data.id,
+          status: 'PAID',
+          decisionAt,
+          paymentReference: `NEFT-SIM-${runSuffix}`,
+        });
+        assertEquals(first.body['verdict'], 'applied', 'the first PAID ingest was not verdict applied');
+        assertEquals(first.body['claimStatus'], 'PAID', 'the first PAID ingest did not set claimStatus PAID');
+        console.log(`  ingest PAID (decisionAt=${decisionAt}) → verdict=${String(first.body['verdict'])}`);
+
+        // The replay: the IDENTICAL decisionAt. R17: EQUAL is RE-APPLIED — a
+        // genuine self-heal, not merely "no-op, already done" — never
+        // `ignored_stale` (that answer is reserved for a decisionAt STRICTLY
+        // OLDER than what is already stored).
+        const replay = await postClaimStatusIngest({
+          expenseId: logged.data.id,
+          status: 'PAID',
+          decisionAt,
+          paymentReference: `NEFT-SIM-${runSuffix}`,
+        });
+        assertEquals(
+          replay.body['verdict'],
+          'applied',
+          'a re-push with an EQUAL crmDecisionAt was not RE-APPLIED — it should never be ignored_stale',
+        );
+        assertEquals(replay.body['claimStatus'], 'PAID', 'the replayed ingest lost claimStatus PAID');
+        console.log(`  re-ingest with the SAME decisionAt → verdict=${String(replay.body['verdict'])} (RE-APPLIED, not an error)`);
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Step 49 — close and summarize.
+    // -------------------------------------------------------------------
+
+    await step(49, 'close() the client', async () => {
       kaafil.close(); // synchronous — no in-flight request survives it
     });
     passed++;

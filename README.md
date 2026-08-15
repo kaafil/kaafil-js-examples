@@ -213,6 +213,36 @@ claim is sharper against a trip nothing has touched yet: "the four sections were
 convincing on a trip whose checklist this file has never read before, rather than one it has already
 been reading and writing to for twenty steps.
 
+### Steps 42-48 need `float`/`expenses`/`collections` enabled, a reachable presigned-upload endpoint, and — for step 48 only — `expenses.claims`
+
+Same plan-gated shape as the three sections above for `float`, `expenses` and `collections` themselves
+(against this repo's seeded demo agency, all three are already `true`). Two of the four money modules
+carry a wrinkle the others do not:
+
+- **Step 44's receipt upload needs the presigned `uploadUrl` to be reachable from wherever this process
+  runs.** Against a real deployment it always is — a production storage endpoint is reachable by
+  definition, by anything that can already reach the API. Against THIS repo's own docker-compose engine,
+  the URL is signed for MinIO's hostname *inside* the compose network (`http://minio:9000`), which
+  resolves nowhere from a host process (confirmed by hand: `curl -X PUT http://minio:9000/...` answers
+  `curl: (6) Could not resolve host: minio`, from any host process, regardless of which port
+  docker-compose maps `9000` to). `on-ground/upload.ts` tries the signed URL directly first — and needs
+  nothing else against a reachable endpoint — and falls back to `KAAFIL_STORAGE_LOCAL_PROXY` (see
+  `.env.example`) ONLY on a connection-level failure, dialling that host:port while still presenting the
+  ORIGINAL signed `Host` header (the signature covers it). See
+  [The presigned upload and this repo's own docker network](#the-presigned-upload-and-this-repos-own-docker-network)
+  below for the full diagnosis.
+- **Step 48 needs `expenses.claims` enabled on the agency, and *nothing in this repo can turn it on*.**
+  This build's own seed (`prisma/seed.ts`) sets it `false` on purpose, alongside several other flags left
+  off deliberately for the rest of the test suite. The *only* route that flips it,
+  `PATCH /api/v1/agencies/{ref}/entitlement`, is `auth: 'console'` — a session-cookie credential no
+  partner API key or manager session can ever present, structurally, the same as every other
+  console-only operation this README already names (registering step 21's webhook endpoint, minting a
+  template for step 38). Against THIS repo's seeded agency, **step 48 fails**, naming the cause plainly,
+  rather than skipping — the same rule the top of `server/simulate.ts` states for every step: a step that
+  cannot be verified is a failing step. See
+  [What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do) for the full
+  finding.
+
 ## What each half proves
 
 | | `server/simulate.ts` steps 1-11 | `server/simulate.ts` steps 12-22 | `browser/` |
@@ -302,6 +332,28 @@ therefore real SDK calls today (step 40 uses them); every write is `managerAuth`
 So the write-side gap is structurally identical to itinerary/rooming's, not to seating/pickups/treks'
 (which had no resource group of any kind to reach for). This paragraph, and `on-ground/types.ts`'s own
 header on the checklist section, will be the ones to delete the day that changes.
+
+## The money walkthrough — what each of steps 42-48 proves
+
+Float, expenses, a receipt through the real upload flow, collections and the claim-status ingest. Same
+discipline as the three tables above.
+
+| Step | The claim |
+|---|---|
+| 42 | Issuing float to a manager who has never had a movement on this trip derives a balance starting from **exactly zero** — `balanceBeforeMinor: 0`, not merely "whatever was there before", because there was nothing there before. |
+| 43 | Logging a `FLOAT_CASH` expense and **replaying the identical `Idempotency-Key`** returns the same `Expense` row both times, and the float summary's `spentMinor` moves by exactly ONE expense's amount — a replay that produced a second `Expense` or a second coupled `FloatMovement` would be an invisible double-spend from the response alone (the engine replays the stored response verbatim on a key match); the ledger is what actually proves only one movement landed. |
+| 44 | A receipt goes through the REAL flow: `POST /files` for a presigned slot, an actual `PUT` of genuine JPEG-signature bytes to that URL, `confirm` (which sniffs the leading bytes against the declared content type), then `PATCH …/receipt` to link the confirmed file — clearing `missingReceipt`. No step here fabricates a `receiptFileKey` or skips the byte-level `UPLOAD_MISMATCH` check the engine actually runs. |
+| 45 | Voiding the `FLOAT_CASH` expense nets the float balance back to **exactly** its pre-expense figure — not "up by roughly the right amount" — because the void posts a reversing `ADJUSTMENT(IN)` in the same transaction. `spentMinor` itself stays unchanged (a separate, reversing row corrects the balance; nothing rewrites history). |
+| 46 | A collection is recorded against a balance the CRM itself pushed (`kaafil.trips.balance.push`) — collections never derives an outstanding figure from nothing. A partial payment derives the correct remaining outstanding; an overpay of one rupee more than is actually left is a **hard refusal**, `422 BUSINESS_RULE_VIOLATION`, naming the real remaining figure in `details.remainingMinor` rather than silently clamping. |
+| 47 | An over-return of float — one rupee more than the manager's current derived balance — is refused identically, `details.currentBalanceMinor` naming the figure the guard actually compared against. The positive control immediately after (returning EXACTLY the current balance) succeeds and nets to zero: the guard is a boundary, not a blanket refusal. |
+| 48 | A `PERSONAL` expense is claimed, the CRM's own credential (a raw `X-API-Key` call — `kaafil-js` has no `expenses` resource group at all) ingests a `PAID` decision, and a **replay with the identical `crmDecisionAt`** comes back `verdict: 'applied'` a second time — RE-APPLIED, a genuine self-heal, never `ignored_stale` (reserved for a decision strictly OLDER than what is already stored) and never merely "already done, no-op". **Against this repo's seeded agency this step fails** — see the prerequisites note above and [What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do). |
+
+`kaafil-js` carries no `float`, `expenses`, `collections` or `files` resource group at all — not even
+read-only on the API-key client, the shape itinerary/rooming/checklists already have. So all four extend
+`on-ground/client.ts` for their manager-session writes, exactly as itinerary/rooming did first. The ONE
+exception is the claim-status ingest itself (`auth: 'apiKey'`, the CRM's own credential) — it does not
+belong on a manager-session client at all, so `server/simulate.ts` calls it directly with its own small
+helper rather than smuggling an API-key call into `on-ground/`.
 
 ### The `?since=` cursor is the one thing to get right
 
@@ -534,6 +586,74 @@ Two details that are load-bearing rather than decorative:
   steps 33-40 is the MANAGER's board — `ChecklistPhase`-bucketed, internal-audience by default. The
   traveller's own view (flat, filtered to `audience: EXTERNAL`, reached through a share token rather than a
   manager session) is Phase 12's, and no route for it exists yet for this repo to call.
+- **Steps 42, 43, 45, 46 and 47 (float, expenses, collections) go through `on-ground/` for the same
+  reason itinerary/rooming did first: `kaafil-js` has no `float`, `expenses` or `collections` resource
+  group at all, on either client** — not even read-only on the API-key side, the one shape
+  itinerary/rooming/checklists already have. `on-ground/client.ts` grew three more typed sections rather
+  than a second stand-in pattern, and everything said above about that stand-in — one error class, no
+  retry ladder, no token rotation, hand-restated response shapes, deleted rather than migrated — applies
+  identically here. Step 48's claim-status ingest is the one write in this whole block that does NOT
+  belong on that client: it is `auth: 'apiKey'`, the CRM's own credential, and `server/simulate.ts` calls
+  it directly with its own small helper for exactly that reason.
+- **Step 44's receipt upload needed a genuine networking workaround, documented rather than hidden, to
+  reach a live result at all.** `POST /api/v1/files` hands back a `PUT` presigned against the ENGINE's own
+  `S3_ENDPOINT` — under this repo's own docker-compose stack, `http://minio:9000`, MinIO's hostname
+  *inside* the compose network. This repo's own process runs on the host, and `minio` resolves nowhere
+  from there: confirmed by hand, `curl -X PUT http://minio:9000/...` answers
+  `curl: (6) Could not resolve host: minio`, regardless of which host port docker-compose maps MinIO's
+  `9000` to (a port mapping does not make a hostname resolve). This is a fact about THIS repo's local
+  stack, never about the wire contract — a real deployment's storage endpoint is reachable by anything
+  that can reach the API at all. `on-ground/upload.ts` tries the signed URL directly first (the only
+  thing a production integrator ever needs) and falls back to `KAAFIL_STORAGE_LOCAL_PROXY` (an env var,
+  documented in `.env.example`) *only* on a connection-level failure — dialling that host:port while
+  still presenting the ORIGINAL signed `Host` header, because `X-Amz-SignedHeaders` includes `host` and
+  the object storage's signature check recomputes against whatever that header says. `fetch` cannot do
+  this at all (`Host` is a forbidden header name under the fetch spec); that is the one reason this single
+  call drops to `node:http` instead of the `fetch` every other write in this repo uses. Told to the run:
+  step 44 passes against this repo's own stack only because `.env` sets `KAAFIL_STORAGE_LOCAL_PROXY`; a
+  reader who unsets it will see the direct attempt fail with a clear, actionable message naming exactly
+  why, not a bare network error.
+- **Step 48 (the claim-status ingest replay) cannot be driven to completion against this repo's own
+  seeded agency, and no credential this repo holds can fix that.** `expenses.claims` is off
+  (`prisma/seed.ts` sets it `false` on purpose, alongside several other flags left off deliberately for
+  the rest of the engine's own test suite), and the *only* route that flips an agency's entitlement,
+  `PATCH /api/v1/agencies/{ref}/entitlement`, is `auth: 'console'` — a session-cookie credential
+  structurally unreachable from a partner API key or a manager session, the identical shape as
+  registering step 21's webhook endpoint or seeding step 38's template library. `submitClaim` answers
+  `402 PLAN_FEATURE_DISABLED` the moment it is attempted, and step 48 **fails**, naming this cause
+  plainly, rather than silently skipping the rest of the money walkthrough or faking a passing assertion.
+  This is a genuine finding about what a partner-side integration can and cannot self-serve, not a defect
+  in this repo's code — flip `expenses.claims` on for the seeded agency from a console session and the
+  same step, unmodified, demonstrates the full claim → ingest PAID → replay-with-equal-`crmDecisionAt` →
+  RE-APPLIED flow the task set out to prove.
+
+### The presigned upload and this repo's own docker network
+
+The full diagnosis behind `on-ground/upload.ts` and `KAAFIL_STORAGE_LOCAL_PROXY`, in one place, because
+two bullets above only summarise it:
+
+1. `POST /api/v1/files` hands back `uploadUrl`, a presigned `PUT` signed by the ENGINE's own
+   `S3_ENDPOINT` — never by anything this repo controls.
+2. Against this repo's `kaafil-engine` docker-compose stack, `S3_ENDPOINT=http://minio:9000` — MinIO's
+   hostname *inside* the compose network, published to the HOST machine on a different port
+   (`19000`, this repo's own `docker-compose.yml`).
+3. A hostname and a port mapping are two different things. Mapping container port `9000` to host port
+   `19000` does not make the hostname `minio` resolve anywhere outside the compose network — confirmed
+   directly: `curl -X PUT http://minio:9000/...` from this repo's own host process answers
+   `curl: (6) Could not resolve host: minio`, every time.
+4. The fix is NOT to strip or re-sign anything — `X-Amz-SignedHeaders` includes `host`, so MinIO
+   recomputes the signature against whatever `Host` header actually arrives. The PUT must still present
+   `Host: minio:9000` for that to match. What changes is only WHERE the TCP connection goes:
+   `KAAFIL_STORAGE_LOCAL_PROXY=localhost:19000` (set in this repo's own `.env` for the run this README
+   describes) tells `on-ground/upload.ts` to dial `localhost:19000` instead, while still sending
+   `Host: minio:9000` — verified by hand first with `curl --connect-to minio:9000:127.0.0.1:19000`,
+   which is the exact mechanism `node:http` (not `fetch` — `Host` is a forbidden header name under the
+   fetch spec) reproduces in code.
+5. This is exercised ONLY as a fallback, after a direct attempt fails with a connection-level error
+   (`ENOTFOUND`/`ECONNREFUSED`/`ECONNRESET`/`EAI_AGAIN`) — never on an HTTP error response, which is the
+   object storage's own answer and must surface unchanged. Against a real deployment, whose storage
+   endpoint is reachable by anything that can reach the API at all, the direct attempt succeeds and none
+   of this runs.
 
 ### Still not demonstrated, though the endpoints exist
 
@@ -612,6 +732,25 @@ expect to find here:
   route this phase's other wave added, deliberately excluded from `kaafil-js` on purpose (it authenticates
   with a console session cookie, never something an integration holds) and therefore out of reach of this
   repo's SDK-based walkthrough by design, not by gap.
+- **`float.adjust`, and an API-key/agency-admin caller of `float.issue`/`float.adjust`.** Both routes
+  accept those credentials too (RULES §7 marks Admin ✅ on both rows); this walkthrough only ever issues
+  and returns through the manager session, for consistency with the rest of the file.
+- **`withdrawExpenseClaim`**, and a claim decided `REJECTED`/`APPROVED` rather than `PAID`, and a
+  `crmDecisionAt` strictly OLDER than what is stored (the `ignored_stale` branch R17 also names) — step
+  48 exercises only the `PAID` + equal-timestamp RE-APPLIED path, and could not reach even that far
+  against this repo's seeded agency (see above).
+- **`voidCollection`**, and `listCollections`'/`listExpenses`' own filters and `?since=` delta — step 46
+  only ever records, and none of steps 42-48 pulls a delta over float, expenses or collections the way
+  step 17 exercises the itinerary's.
+- **`readFileUrl`** (`GET /files/:id/url`, the short-lived signed GET) and a receipt linked from a file
+  belonging to a DIFFERENT trip (`422 VALIDATION_ERROR`) — step 44 only ever requests, uploads, confirms
+  and links.
+- **The `423 LOCKED` a close-out lock would answer on any of float/expenses/collections' writes** — the
+  identical gap the itinerary/rooming and checklist sections above name, for the same reason: the lock is
+  mounted as a pass-through, so there is nothing live here either to provoke it against.
+- **`expenses.adminEntry`** (an API-key caller logging or linking a receipt directly) — unreachable today
+  for the identical reason `files`' `form_attachment` purpose is: the knob it would read has no
+  `Agency.settings` row to answer from yet (`expenses.routes.ts`'s own header).
 
 ## Licence
 
