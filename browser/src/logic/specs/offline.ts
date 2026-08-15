@@ -7,7 +7,7 @@
 // client, the same lane `../live/transport.ts`'s `managerClient()` hands out.
 // `offline.outbox` gets NO live() — it is a genuine Phase-15 stub (`no-offline-outbox`
 // in GAPS.md): there is no write-ahead queue anywhere to call.
-import { currentSession, managerClient } from '../live/transport';
+import { managerClient } from '../live/transport';
 import { okLive, toFail } from '../live/lane';
 
 // The live cursor, per trip — mirrors `c.sim.cursor`'s role for simulated
@@ -44,7 +44,7 @@ export const offlineSpecs = (c: any) => ({
   'offline.idem': {
     lane: 'D',
     note: 'Every write method accepts an idempotencyKey and the SDK generates one if you do not. Reusing a key with a DIFFERENT body is a 422, not a silent overwrite.',
-    p: [{ n: 'key', l: 'idempotencyKey', k: 'text', v: 'idem_boarding_7841' }, { n: 'body', l: 'body', k: 'sel', v: 'same as last time', o: ['same as last time', 'different this time'] }],
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'text' }, { n: 'key', l: 'idempotencyKey', k: 'text', v: 'idem_boarding_7841' }, { n: 'body', l: 'body', k: 'sel', v: 'same as last time', o: ['same as last time', 'different this time'] }],
     req: (p: any) => ['POST', '/api/v1/trips/…/itinerary/items', { 'Idempotency-Key': p.key }],
     snip: (p: any) => `await client.itinerary.items.add({\n  …payload,\n  idempotencyKey: '${p.key}',   // fixed for the life of the queued job\n});`,
     run: (p: any) => p.body === 'same as last time'
@@ -58,12 +58,14 @@ export const offlineSpecs = (c: any) => ({
     // (real `422 IDEMPOTENCY_KEY_REUSED` from the engine, not a scripted one).
     live: async (p: any) => {
       try {
+        if (!String(p.tripRef || '').trim()) {
+          return { err: { name: 'NothingToActOn', code: null, status: null, message: 'offline.idem needs a real tripRef to log an expense against — paste one above (a ref you\'ve pushed via trips.upsert).', details: null, retryable: 'no' } };
+        }
         const client = managerClient();
-        const tripRef = currentSession()!.tripRef;
         const baseline = { amountMinor: 1500, currency: 'INR', category: 'MISC' as const, paymentMode: 'PERSONAL' as const, description: 'offline.idem live demo' };
-        await client.expenses.log({ tripRef, ...baseline, idempotencyKey: p.key });
+        await client.expenses.log({ tripRef: p.tripRef, ...baseline, idempotencyKey: p.key });
         const secondBody = p.body === 'same as last time' ? baseline : { ...baseline, amountMinor: baseline.amountMinor + 100 };
-        const second = await client.expenses.log({ tripRef, ...secondBody, idempotencyKey: p.key });
+        const second = await client.expenses.log({ tripRef: p.tripRef, ...secondBody, idempotencyKey: p.key });
         // Two real writes happen above, but this demo's response summarises
         // them (the replay flag, the second call's id) rather than mirroring
         // either call's own envelope — no single meta is "the" right one to

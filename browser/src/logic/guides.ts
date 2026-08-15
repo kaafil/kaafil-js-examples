@@ -35,20 +35,20 @@ export const guides = (c: any): Record<string, any[][]> => ({
     ['h', 'The four routes your CRM backend exposes'],
     ['p', 'This is the whole contract between the playground and your side. Everything else the playground does, it does straight against the engine on a manager session.'],
     ['tbl', ['ROUTE', 'WHAT IT DOES', 'WHY IT IS YOURS'], [
-      ['POST /session', 'mints a manager session for a trip + manager, returns { accessToken, refreshToken, expiresIn }', 'the only call that touches the API key'],
+      ['POST /session', 'mints a manager session, returns { accessToken, refreshToken, expiresIn }', 'the only call that touches the API key'],
       ['POST /trips', 'ingests or updates a trip (kaafil.trips.upsert)', 'your records, your sourceUpdatedAt'],
       ['POST /manifest', 'pushes the traveller roster (kaafil.trips.travellers.pushManifest)', 'your roster is the source of truth'],
       ['GET /trips/:ref', 'echoes what the engine holds for one trip', 'handy for a reconcile screen']
     ]],
     ['h', 'Handing a session to the browser'],
     ['p', 'The playground calls POST /session on your backend, opens a KaafilClient with the pair it gets back, and from then on rotates itself. Your one job in the browser is persisting the rotated pair.'],
-    ['code', 'the handoff, end to end', "// your backend\napp.post('/session', async (req, res) => {\n  const { data } = await kaafil.auth.mintManagerToken({\n    tripRef: req.body.tripRef, managerRef: req.body.managerRef, ttlSeconds: 900,\n  });\n  res.json(data);              // tokens only. never the key\n});\n\n// this playground\nconst { accessToken, refreshToken } = await fetch(BACKEND + '/session', {…}).then(r => r.json());\nclient.session.open({ accessToken, refreshToken, onRefresh: persist });"],
+    ['code', 'the handoff, end to end', "// your backend\napp.post('/session', async (req, res) => {\n  const { data } = await kaafil.auth.mintManagerToken({\n    managerRef: req.body.managerRef,\n  });\n  res.json(data);              // tokens only. never the key\n});\n\n// this playground\nconst { accessToken, refreshToken } = await fetch(BACKEND + '/session', {…}).then(r => r.json());\nclient.session.open({ accessToken, refreshToken, onRefresh: persist });"],
     ['note', 'A manager access token lives minutes. If a pair sits in a terminal for half an hour, mint a new one rather than debugging a 401 — the browser rotates its own pair, but it cannot resurrect one that expired before it opened.'],
     ['h', 'One gap worth knowing before you start'],
     ['p', 'The coalescing lesson counts events the engine emitted, which needs a webhook endpoint subscribed to itinerary.updated. Registering one is a console operation and there is no route for it here, so on a real engine that step needs a one-time setup outside this code. In Simulated mode it works out of the box.']
   ],
   tour: [
-    ['h', 'Twelve lessons, in dependency order'],
+    ['h', 'Eighteen lessons, in dependency order'],
     ['p', 'Each one opens a real method screen with the parameters already set for the claim it is making. Nothing is locked — the order is a suggestion, not a gate, and you can leave the tour at any point and keep playing.'],
     ['lessons'],
     ['note', 'A lesson counts as done the moment you run its method. Reset simulator clears the data and the ticks together.']

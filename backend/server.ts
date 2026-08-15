@@ -8,12 +8,13 @@
  * manager-session token pair this server mints and hands it, which is the
  * whole point of `POST /session` existing as a route at all.
  *
- * Four routes are the real teaching contract (the guide screen names them):
+ * Five routes are the real teaching contract (the guide screen names them):
  *
- *   POST /session       {tripRef, managerRef, ttlSeconds?} -> a manager session
- *   POST /trips         -> kaafil.trips.upsert
- *   POST /manifest      -> kaafil.trips.travellers.pushManifest
- *   GET  /trips/:ref    -> kaafil.trips.get
+ *   POST /session               {managerRef, ttlSeconds?} -> a manager session
+ *   POST /agency-admin-session  {agencyAdminRef} -> an agency-admin session
+ *   POST /trips                 -> kaafil.trips.upsert
+ *   POST /manifest              -> kaafil.trips.travellers.pushManifest
+ *   GET  /trips/:ref            -> kaafil.trips.get
  *
  * Two more exist to let the playground demonstrate the rest of the API-key
  * lane honestly, without becoming a pattern to copy — see `POST /sdk`'s own
@@ -396,7 +397,6 @@ function serializeError(error: unknown): { status: number; body: { error: Record
 // ---------------------------------------------------------------------------
 
 interface Session {
-  readonly tripRef: string;
   readonly managerRef: string;
   readonly ttlSeconds?: number;
 }
@@ -406,17 +406,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function handleSession(body: unknown, req: IncomingMessage) {
-  if (!isRecord(body) || typeof body.tripRef !== 'string' || typeof body.managerRef !== 'string') {
-    throw new SdkPathMalformedError('"tripRef" and "managerRef" (strings) are required.');
+  if (!isRecord(body) || typeof body.managerRef !== 'string') {
+    throw new SdkPathMalformedError('"managerRef" (string) is required.');
   }
   const session = body as unknown as Session;
   // `mintManagerTokens`' own request schema (`openapi.json`) takes exactly
-  // `managerRef` — `tripRef` is accepted here (the guide's documented
-  // contract) but not forwarded: there is nowhere in the vendored request
-  // shape for it to go, and `ttlSeconds` is likewise not a field the engine
-  // accepts on this operation today. Both are accepted, neither is silently
-  // pretended to change engine behaviour it does not have.
-  void session.tripRef;
+  // `managerRef` — `ttlSeconds` is accepted here (a "your own route might
+  // want this" example) but not forwarded: it is not a field the engine
+  // accepts on this operation today. An earlier revision of this route also
+  // accepted a `tripRef` for the same illustrative reason; it was removed
+  // because nothing anywhere in this reference backend ever read it back —
+  // a manager session is scoped to the manager alone (authorization for any
+  // one trip is checked at the point of use, on every trip-scoped call,
+  // never at mint time), so asking for a trip here taught the opposite of
+  // how the product actually works.
   void session.ttlSeconds;
   const response = await kaafil.auth.mintManagerToken({
     managerRef: session.managerRef,
@@ -431,6 +434,30 @@ async function handleSession(body: unknown, req: IncomingMessage) {
   // to fabricate a stand-in (`browser/src/logic/live/lane.ts`'s
   // now-deleted `liveMeta()`), which is exactly the never-fake invariant
   // this route exists to uphold. Forwarded verbatim, never reshaped.
+  return { accessToken, refreshToken, expiresIn, baseUrl: engineBaseUrl, meta };
+}
+
+interface AgencyAdminSession {
+  readonly agencyAdminRef: string;
+}
+
+/**
+ * `POST /agency-admin-session` — the agency-admin analogue of `/session`
+ * above. A dedicated named route, not routed through `/sdk`'s generic
+ * dispatcher, for the same reason `/session` gets one: this mints a
+ * credential and carries the API key, and this repo teaches both minting
+ * routes by name (`GAPS.md`, the guide screen).
+ */
+async function handleAgencyAdminSession(body: unknown, req: IncomingMessage) {
+  if (!isRecord(body) || typeof body.agencyAdminRef !== 'string') {
+    throw new SdkPathMalformedError('"agencyAdminRef" (string) is required.');
+  }
+  const session = body as unknown as AgencyAdminSession;
+  const response = await kaafil.auth.mintAgencyAdminToken({
+    agencyAdminRef: session.agencyAdminRef,
+    idempotencyKey: idempotencyKeyFromHeader(req),
+  } as never);
+  const { accessToken, refreshToken, expiresIn, meta } = response;
   return { accessToken, refreshToken, expiresIn, baseUrl: engineBaseUrl, meta };
 }
 
@@ -520,6 +547,13 @@ const server = createServer((req, res) => {
       if (req.method === 'POST' && pathname === '/session') {
         const body = await readJsonBody(req);
         const data = await handleSession(body, req);
+        sendJson(res, 200, data);
+        return;
+      }
+
+      if (req.method === 'POST' && pathname === '/agency-admin-session') {
+        const body = await readJsonBody(req);
+        const data = await handleAgencyAdminSession(body, req);
         sendJson(res, 200, data);
         return;
       }

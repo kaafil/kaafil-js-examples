@@ -4,7 +4,7 @@
 // `live(p)` additions (this job): all four are lane B — API-key-only in the
 // vendored spec — so every one goes through `sdkCall()`, proxied by
 // `backend/server.ts`'s `/sdk` dispatcher. See `../live/lane.ts`.
-import { sdkCall } from '../live/transport';
+import { resolveAgencyRef, sdkCall } from '../live/transport';
 import { okFromSdk, toFail } from '../live/lane';
 
 export const tripsSpecs = (c: any) => ({
@@ -47,15 +47,18 @@ export const tripsSpecs = (c: any) => ({
       if (!/T\d\d:\d\d/.test(String(p.startDate)))
         return c.fail('KaafilInvalidRequestError', null, null, 'startDate must carry a time and an offset — "' + p.startDate + '" is date-only. Refused locally, before any request: the SDK will not guess which timezone’s midnight you meant.', { field: 'startDate', got: p.startDate, want: '2026-08-20T00:00:00+05:30' });
       try {
+        // `code`/`name` have no dedicated fields on this screen (matching
+        // the sim's own simplified model) — derived from `externalId`,
+        // which is fine, they're cosmetic. `externalAgencyId` is NOT
+        // cosmetic: it must resolve to a real agency already known to this
+        // tenant, so it's read for real via `resolveAgencyRef()` off
+        // `backend/server.ts`'s `GET /health` (`KAAFIL_AGENCY_REF`) rather
+        // than fabricated — a guessed ref 404s as "Agency not found" on any
+        // tenant that isn't empty.
+        const externalAgencyId = await resolveAgencyRef();
         const body = await sdkCall(['trips', 'upsert'], {
           externalTripId: p.externalId,
-          // `externalAgencyId`/`code`/`name` are required by the real
-          // `UpsertTripRequest` schema but this screen's params (matching
-          // the sim's own simplified model) don't collect them, and the
-          // browser has no way to look up the real agency ref. Derived
-          // placeholders so a genuine request can be sent at all — see the
-          // live-wiring report for this divergence.
-          externalAgencyId: 'agency-' + p.externalId,
+          externalAgencyId,
           code: p.externalId,
           name: 'Trip ' + p.externalId,
           tripMode: p.tripMode,
@@ -108,10 +111,53 @@ export const tripsSpecs = (c: any) => ({
       }
     }
   },
+  'trips.manager': {
+    lane: 'B',
+    note: 'Dual-mode identity: leave externalManagerId blank and Kaafil provisions the manager row itself; supply your own CRM id and it resolves/links on first sighting, then LWW-upserts on every later one.',
+    p: [
+      { n: 'externalManagerId', l: 'externalManagerId (blank = Kaafil-provisioned)', k: 'text', v: 'crm-mgr-04' },
+      { n: 'fullName', l: 'fullName', k: 'text', v: 'Priya Sharma' },
+      { n: 'phone', l: 'phone (optional)', k: 'text', v: '' }
+    ],
+    // The real operation is `POST /api/v1/managers` (`UpsertManagerRequest`) —
+    // not trip-scoped despite `kaafil.trips.managers.upsert(...)`'s namespacing
+    // under the `trips` resource group; a manager is an agency-wide entity,
+    // independent of any one trip assignment (`kaafil-js/src/resources/trips.ts`
+    // header comment).
+    req: (p: any) => ['POST', '/api/v1/managers', { externalManagerId: p.externalManagerId || undefined, fullName: p.fullName, phone: p.phone || undefined, sourceUpdatedAt: '<your record’s own timestamp>' }],
+    snip: (p: any) => `const { data } = await kaafil.trips.managers.upsert({\n${p.externalManagerId ? `  externalManagerId: '${p.externalManagerId}',\n` : ''}  fullName: '${p.fullName}',\n${p.phone ? `  phone: '${p.phone}',\n` : ''}  sourceUpdatedAt: record.updatedAt,      // required, never defaulted\n});\n// data.id (Kaafil's own manager id, NOT externalManagerId) is what\n// auth.mintManagerToken's managerRef and trips.assign both take.`,
+    run: (p: any) => {
+      c.sim.managers = c.sim.managers || {};
+      const ref = 'mgr_' + String(p.externalManagerId || p.fullName).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      const exists = !!c.sim.managers[ref];
+      c.sim.managers[ref] = { ref, externalManagerId: p.externalManagerId || null, fullName: p.fullName, phone: p.phone || null, version: exists ? c.sim.managers[ref].version + 1 : 1 };
+      return c.ok({ managerRef: ref, version: c.sim.managers[ref].version, created: !exists });
+    },
+    live: async (p: any) => {
+      try {
+        // `externalAgencyId` is required by the real `UpsertManagerRequest`
+        // schema but this screen's params don't collect one — resolved for
+        // real via `resolveAgencyRef()`, same as `trips.upsert`'s `live()`
+        // above, rather than a fabricated ref that would 404 as "Agency
+        // not found" on any tenant that isn't empty.
+        const externalAgencyId = await resolveAgencyRef();
+        const body = await sdkCall(['trips', 'managers', 'upsert'], {
+          externalAgencyId,
+          externalManagerId: p.externalManagerId || undefined,
+          fullName: p.fullName,
+          phone: p.phone || undefined,
+          sourceUpdatedAt: new Date().toISOString(),
+        });
+        return okFromSdk(body);
+      } catch (err) {
+        return toFail(err);
+      }
+    }
+  },
   'trips.assign': {
     lane: 'B',
     note: 'COORDINATOR is read-only on the on-ground surfaces — a write from that role answers 422 READ_ONLY_ROLE.',
-    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01' }, { n: 'role', l: 'ManagerRole', k: 'sel', v: 'LEAD', o: ['LEAD', 'COORDINATOR'] }],
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01', ref: true, refHint: "paste the id trips.managers.upsert's response returned — mgr_lead_01 only exists in Simulated mode" }, { n: 'role', l: 'ManagerRole', k: 'sel', v: 'LEAD', o: ['LEAD', 'COORDINATOR'] }],
     req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/managers', { managerRef: p.managerRef, role: p.role }],
     snip: (p: any) => `const { data } = await kaafil.trips.managers.assign({\n  tripRef: '${p.tripRef}',\n  managerRef: '${p.managerRef}',\n  role: ManagerRole.${p.role === 'LEAD' ? 'Lead' : 'Coordinator'},\n  sourceUpdatedAt: record.updatedAt,\n});`,
     run: (p: any) => {

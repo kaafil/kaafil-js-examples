@@ -29,7 +29,7 @@ CRM backend would actually implement:
 
 | route | calls | purpose |
 |---|---|---|
-| `POST /session` | `kaafil.auth.mintManagerToken` | Mint a manager session for the browser to hold. Body: `{tripRef, managerRef, ttlSeconds?}` (`tripRef` and `ttlSeconds` are accepted for the guide's documented shape but not forwarded to the engine — `mintManagerTokens`' own request schema takes only `managerRef`; there is nowhere in the vendored contract for the other two to go). Returns `{accessToken, refreshToken, expiresIn}`. |
+| `POST /session` | `kaafil.auth.mintManagerToken` | Mint a manager session for the browser to hold. Body: `{managerRef, ttlSeconds?}` (`ttlSeconds` is accepted for the guide's documented shape but not forwarded to the engine — `mintManagerTokens`' own request schema takes only `managerRef`, so a session is scoped to the manager alone, not to any one trip; authorization for a trip is checked at the point of use, on every trip-scoped call, never at mint time). Returns `{accessToken, refreshToken, expiresIn}`. |
 | `POST /trips` | `kaafil.trips.upsert` | Create or update a trip. |
 | `POST /manifest` | `kaafil.trips.travellers.pushManifest` | Push the traveller manifest for a trip. |
 | `GET /trips/:ref` | `kaafil.trips.get` | Read a trip back by its ref. |

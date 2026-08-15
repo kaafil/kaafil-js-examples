@@ -25,6 +25,8 @@ These look like missing capability. They are designed limits. Filing a bug again
 | `B4` | Reviews and support tickets: no module, no endpoints | `modules/reviews/FRD.md:6`, `modules/tickets/FRD.md:6` — `Status: Deferred (D-025)`. `memory/DECISIONS.md` D-025: "For v1 a post-trip complaint is the CRM's to handle — it owns the customer relationship and the ledger — a deliberate hand-off, not a gap nobody noticed." |
 | `B5` | `KaafilClient` holds session tokens in memory only; nothing persists across a reload | `kaafil-js/src/storage/adapter.ts` header: "a half-durable store is worse than an absent one" — the host app is expected to own persistence. A working pattern already ships (`kaafil-js-examples/browser/src/logic/specs/session.ts:23`, `onRefresh` → `sessionStorage`). Not a numbered decision, but stated design intent with a demonstrated correct pattern — treat requests to "make the SDK remember my session" as out of scope, not unbuilt. |
 | `B6` | No `auth.revoke()` method ships, despite an internal doc (`08-sdk.md §4`) listing one | The vendored spec's `Auth` tag has exactly four operations and no revoke operation exists anywhere to wrap (`kaafil-js/src/resources/auth.ts:1-21` flags this explicitly). The internal doc is stale against the contract; there is nothing for the SDK to be missing. |
+| `B7` | No `apiKeyAuth` trip-listing operation exists — only `getTrip` (by ref) and the `consoleAuth`-only `listConsoleTrips` | `openapi.json`'s `Trips` tag has no collection route (`GET /api/v1/trips`); the only listing surface anywhere in the spec is console-scoped. A CRM tracks its own trip refs (it minted them via `trips.upsert`'s `externalTripId`) rather than asking Kaafil to enumerate them back. |
+| `B8` | No operation reads or lists a Manager entity — only `upsertManager` (create/update) and the trip-scoped `assignManager`/`unassignManager` | `openapi.json` has no `GET /api/v1/managers` or `GET /api/v1/managers/{ref}`. Same shape as `B7`: a CRM already holds the `externalManagerId` it upserted with, or the `managerRef` a prior upsert/assign returned — there is no server-side directory to page through. |
 
 ---
 
@@ -42,6 +44,7 @@ Sorted P0 → P3. "Lands in" cites `implementation-plan/README.md`'s phase table
 | `closing-day-unbuilt` | Blockers, close-out lock, and closing pack have no endpoints | crm-backend | `implementation-plan/README.md:42` — Phase 14 not started; no closing-day path in `openapi.json` | manual close-out outside the platform | phase 14 |
 | `dsar-erasure-export-unbuilt` | Traveller erasure and DSAR export are documented but not in the shipped contract | crm-backend | `architecture/11-data-protection.md:31,54` documents `POST /travellers/:ref/erase` and `GET /travellers/:ref/export`; neither exists in `openapi.json` (only the upsert does) | none — a CRM cannot honor a DPDP request through Kaafil today | phase 17 |
 | `agency-admin-upsert-no-sdk-method` | No SDK method wraps `upsertAgencyAdmin` — the one `apiKeyAuth`-satisfiable operation the SDK doesn't expose | sdk-ergonomics | No `upsertAgencyAdmin` export anywhere in `resources/*.ts`; operation is `apiKeyAuth` per `openapi.json:10899-10901` | call it over raw REST with the API key and a hand-built `Idempotency-Key`, then mint the session through the SDK as normal — documented at `managers-and-agency-admins.mdx:117-131` | unscheduled |
+| `no-manager-scoped-client-call` | `KaafilClient` (browser entry) exposes exactly two resource groups — `journey` and `vendors` — and both are trip-scoped; there is no manager-only, non-trip-scoped call reachable from the browser SDK at all | sdk-ergonomics | `GET /api/v1/managers/me/notifications` (`listManagerNotifications`) is `managerAuth`-only and genuinely trip-independent per `openapi.json`, but `client-entry.ts` doesn't wire a `notifications` (or similar) group in; a manager session is identified purely by `managerRef` (no trip claim in the minted JWT), yet nothing on this SDK entry can prove that without also naming a trip | none from the browser SDK — `on-ground/client.ts`'s raw `request()` escape hatch could call it directly with the manager bearer, but nothing in this repo does yet | unscheduled |
 | `agency-settings-endpoint-nonexistent` | `GET/PATCH /api/v1/agencies/:ref/settings` (rooming policy, overpay policy, receipt threshold) is documented but doesn't exist in the spec | crm-backend | `architecture/14-configuration.md §5` documents it as "partner key or console session"; no such path exists in `openapi.json` | an agency runs correctly on hard-coded defaults; only customization is unavailable | unscheduled |
 | `no-vendor-ingest-endpoint` | Vendor directory has no writable surface — `POST /api/v1/vendors` (or assign/swap) doesn't exist; only a read (`listTripVendors`) does | crm-backend | `modules/vendors/FRD.md`: `Status: Planned`; `openapi.json` has exactly one vendor path, read-only | none — vendors is an optional capability-gated module, nothing breaks running a trip without it | unscheduled |
 | `feedback-nps-comms-vendor-rating-unbuilt` | Post-trip NPS, engagement-comms provider registration, and vendor ratings are designed but unshipped | crm-backend | `modules/feedback-nps/FRD.md:3`, `engagement-comms/FRD.md:3`, `vendor-rating/FRD.md:3` all `Status: Planned` | none via API | phase 12 (feedback-nps, vendor-rating), phase 13 (engagement-comms) |
@@ -136,9 +139,14 @@ Per-operation audit of the on-ground modules (`apiKeyAuth`-accepting vs `manager
 genuinely runnable today. `float.issue`/`adjust` being API-key-callable while `float.return` is not is
 not an oversight to paper over: it is the shape of the product (the agency issues, the person returns).
 
-### The actual stub set — 4 of the 73 methods
+### The actual stub set — 4 of the 75 methods
 
 Everything else on the 20 module screens runs for real in Connected mode, via the SDK or via `on-ground/`.
+(75, not 73: `trips.managers.upsert` — create/register a manager, previously wired server-side but
+missing its own screen — and `auth.mintAgencyAdminToken` — the agency-admin session mint, previously
+absent from the playground entirely — were added as ordinary `sdk` screens under Phase 1 · CRM SETUP.
+Both were live-capable before this audit noticed them; the register's own count was simply stale
+against the playground, which `CLAUDE.md` §6 calls out as worse than no register at all.)
 
 | method | stub tone | one-line reason |
 |---|---|---|

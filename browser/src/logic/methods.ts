@@ -22,12 +22,15 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     ['open', 'session.open', 'D', 'sdk'],
     ['rotate', 'session rotation', 'D', 'sdk'],
     ['probe', 'read after close', 'D', 'sdk'],
-    ['share', 'shareTokens.create', 'B', 'sdk']
+    ['share', 'shareTokens.create', 'B', 'sdk'],
+    ['mintAdmin', 'auth.mintAgencyAdminToken', 'B', 'sdk'],
+    ['adminOpen', 'admin.open', 'D', 'sdk']
   ],
   trips: [
     ['upsert', 'trips.upsert', 'B', 'sdk'],
-    ['manifest', 'travellers.pushManifest', 'B', 'sdk'],
+    ['manager', 'trips.managers.upsert', 'B', 'sdk'],
     ['assign', 'managers.assign', 'B', 'sdk'],
+    ['manifest', 'travellers.pushManifest', 'B', 'sdk'],
     ['get', 'trips.get', 'B', 'sdk']
   ],
   journey: [

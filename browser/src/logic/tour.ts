@@ -1,8 +1,15 @@
-// Ported verbatim from .design/logic.js lines 1647-1706.
+// Ported verbatim from .design/logic.js lines 1647-1706, THEN reordered (this
+// job) into the sequence a real CRM's first integration run actually follows
+// against a real, empty tenant. The original order opened with `session.mint`
+// — fine in Simulated mode, where `mgr_lead_01`/`trp_alpine_sept` are
+// pre-seeded fixtures, but a genuine first Connected-mode run has no manager
+// and no trip yet: minting a session for a manager that was never created,
+// or assigning one to a trip that doesn't exist, 404s for a reason a
+// first-time reader has no way to intuit. The real dependency order is
+// trip → manager → assignment → session; everything after that is unchanged.
 //
-// TOUR is the twelve-lesson (well, sixteen-row — the design's own heading
-// says "Twelve lessons" but the array below has sixteen entries; reported,
-// not corrected, per instructions) guided-tour script: each row is
+// TOUR is the eighteen-row guided-tour script (was sixteen — two rows added
+// for the manager-creation step this order now needs): each row is
 // [mod, meth, title, text].
 //
 // tourGo/guideVals are written as class-fragment functions (using `this`)
@@ -10,9 +17,11 @@
 // had them as instance methods reading `this.TOUR`, `this.guides`,
 // `this.state` and calling `this.setState`.
 export const TOUR: any[][] = [
-  ['session', 'mint', 'Mint a manager session', 'Your server holds the key and hands the device a pair that lives minutes. This is the only call that crosses the lanes.'],
-  ['session', 'open', 'Open it on the device', 'One call, one onRefresh hook. Rotation from here is the SDK’s job, not yours.'],
   ['trips', 'upsert', 'Ingest a trip', 'Watch sourceUpdatedAt stay required — and try the date-only startDate chip to see a mistake caught before any request.'],
+  ['trips', 'manager', 'Register a manager', "Managers are Kaafil's own entity, upserted independently of any trip. Leave externalManagerId blank and Kaafil provisions the row itself — copy the id this returns, you'll need it for the next two steps."],
+  ['trips', 'assign', 'Put the manager on the trip', "A manager isn't reachable through a session until it's assigned somewhere. Paste the id from the previous step — LEAD and COORDINATOR read identically; only a write tells them apart."],
+  ['session', 'mint', 'Mint a manager session', 'Your server holds the key and hands the device a pair that lives minutes. This is the only call that crosses the lanes — and the manager it names now actually exists.'],
+  ['session', 'open', 'Open it on the device', 'One call, one onRefresh hook. Rotation from here is the SDK’s job, not yours.'],
   ['trips', 'manifest', 'Push the roster', 'REPLACE is the whole roster. The push enqueues a journey rebuild.'],
   ['journey', 'wait', 'Wait for the build', 'journey.get answers 404 until a worker lands it. waitUntilReady owns the loop, including the judgment that a 404 is fine and everything else is fatal.'],
   ['journey', 'caps', 'Read the capabilities', 'Four axes. A dark row stays in the table with the failing axis false — vendorCoordination is dark on data here.'],

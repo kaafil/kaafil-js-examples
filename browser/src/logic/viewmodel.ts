@@ -69,18 +69,42 @@ export function optsFor(this: any, x: any, tripRef: any, resolved: any): any {
 export function pvals(this: any, key: string, patch?: any): any {
   const sp = this.specs[key]; if (!sp) return {};
   const cur = (this.state.pv || {})[key] || {};
+  // In Connected mode the simulator's ids are the WRONG universe: defaulting a
+  // field to `trp_alpine_sept`, or snapping a pasted real ref back to it
+  // because it is "not in options", would send a request nobody asked for
+  // against an id that cannot exist on the engine. So live mode seeds these
+  // fields empty and leaves whatever the operator typed alone — `exec()`'s
+  // own blank-field guard already refuses locally rather than firing a
+  // request with an empty id. Simulated mode keeps the convenient defaults.
+  const live = this.state.mode === 'live';
   const out: any = {};
   (sp.p || []).forEach((x: any) => {
     if (x.d) return;
     let v = cur[x.n];
-    if (v === undefined) v = x.v !== undefined ? x.v : (x.k === 'sel' ? ((x.o || this.T())[0] || '') : '');
+    if (v === undefined) {
+      // `x.ref` marks a plain-text field whose default is a SIMULATOR-only
+      // fixture id (`mgr_lead_01`, `adm_ops_01`) referencing an entity that
+      // must already exist for the call to succeed — as opposed to `x.v` on
+      // a create-style field (`trips.upsert`'s `externalId`), which is just
+      // an arbitrary example id for a NEW row and is fine to reuse live. The
+      // `sel`-without-options branch below already blanks this class of
+      // field in live mode; `ref` extends the identical rule to `text`
+      // fields, so a first Connected-mode run never quietly 404s against a
+      // fixture that was only ever real in Simulated mode.
+      if (x.ref && live) v = '';
+      else if (x.v !== undefined) v = x.v;
+      else if (x.k !== 'sel') v = '';
+      else if (x.o) v = x.o[0] ?? '';
+      else v = live ? '' : (this.T()[0] || '');
+    }
     out[x.n] = v;
   });
-  const tripRef = out.tripRef || this.T()[0];
+  const tripRef = out.tripRef || (live ? '' : this.T()[0]);
   (sp.p || []).forEach((x: any) => {
     if (!x.d) return;
     const opts = this.optsFor(x, tripRef, out);
     let v = cur[x.n];
+    if (live) { out[x.n] = v === undefined ? '' : v; return; }
     if (v === undefined || opts.indexOf(v) === -1) v = opts.length ? opts[0] : '';
     out[x.n] = v;
   });
@@ -176,11 +200,30 @@ export function bodyVals(this: any, mod: string, act: any): any {
   const vals = this.pvals(key);
   const st = this.state;
   const wired = !!sp;
+  const live = st.mode === 'live';
   const params = wired ? (sp.p || []).map((x: any) => {
     const opts = this.optsFor(x, vals.tripRef, vals);
+    // A `sel` whose options come from the SIMULATOR's own store — `T()`'s trip
+    // refs, or a `d(...)` resolver walking `sim` — cannot be a dropdown in
+    // Connected mode: those ids exist only in the fake, so picking one 404s
+    // against a real engine, and there is nothing to populate a real list
+    // from. THERE IS NO LIST-TRIPS ENDPOINT for any partner credential —
+    // `openapi.json` has no `GET /api/v1/trips` at all (see GAPS.md), so a
+    // client cannot enumerate its own trips even in principle. The honest UI
+    // is therefore a free-text field the operator pastes a real ref into,
+    // not a select that quietly offers the wrong universe.
+    const simSourced = x.k === 'sel' && !x.o;
+    const asText = live && simSourced;
+    // `x.ref` fields (see `pvals`) get the same "paste a real one" hint as a
+    // sim-sourced `sel` once live — a per-field `x.refHint` overrides the
+    // generic wording when the screen has something more specific to say
+    // (e.g. naming exactly which prior call's response field to copy).
+    const refHint = x.ref && live ? (x.refHint || 'paste a real ref here') : null;
     return {
-      n: x.n, l: x.l, hint: x.h || null, value: String(vals[x.n] ?? ''), checked: !!vals[x.n],
-      isText: x.k === 'text', isNum: x.k === 'num', isSel: x.k === 'sel', isBool: x.k === 'bool',
+      n: x.n, l: x.l, hint: refHint || (asText ? 'paste a real ref — no list endpoint exists' : (x.h || null)),
+      value: String(vals[x.n] ?? ''), checked: !!vals[x.n],
+      isText: x.k === 'text' || asText, isNum: x.k === 'num',
+      isSel: x.k === 'sel' && !asText, isBool: x.k === 'bool',
       options: opts,
       set: (e: any) => this.setState({ pv: { ...(st.pv || {}), [key]: { ...((st.pv || {})[key] || {}), [x.n]: x.k === 'bool' ? e.target.checked : e.target.value } } })
     };
@@ -229,6 +272,38 @@ export function viewVals(this: any): any {
     CANCELLED: ['#fef3f2', '#b3312f'], PLANNED: ['#f2f1ef', '#6f6f6f']
   } as any)[s] || ['#f2f1ef', '#6f6f6f'];
   const out: any = { viewNone: !v, viewItin: false, viewRoom: false, viewCaps: false, viewLog: false, viewDelta: false, viewSeat: false, viewPick: false, viewTrek: false, viewChk: false, viewEvents: false, viewErr: false, viewOut: false, viewMoney: false, viewFiles: false, viewShare: false, itinDays: [], roomRows: [], capRows: [], logRows: [], deltaRows: [], seatRows: [], pickRows: [], trekRows: [], chkRows: [], eventRows: [], errRows: [], outRows: [], moneyRows: [], fileRows: [], shareRows: [], viewTitle: '', viewSub: '' };
+  // Everything below is one view branch reading a live/simulated response
+  // whose exact shape this file has to guess at per method — which is
+  // exactly what was wrong in the 'chk' branch this pass fixed (a real
+  // engine response shaped differently from the simulator's fixture threw
+  // partway through building `out`). Wrapping the whole thing is the
+  // structural half of that fix: it is NOT a substitute for getting each
+  // branch's shape right (this pass audited and fixed the ones that were
+  // wrong), it is the backstop for the next shape drift nobody has found
+  // yet. Critically, this has to live HERE, not in a React error boundary —
+  // `viewVals()` runs inside `renderVals()`, called at the top of `App()`'s
+  // own function body, before any JSX exists to catch anything; a boundary
+  // wrapped around `<Views/>` (see `ui/MethodScreen.tsx`) can only ever
+  // catch a bug in a VIEW COMPONENT's own render, never one here — this
+  // repo confirmed that the hard way (a deliberate smoke test threw from
+  // inside this function and surfaced at the outer, whole-app boundary in
+  // `main.tsx`, not the inner one, before this try/catch existed).
+  try {
+    viewValsBody.call(this, v, d, ref, badge, out);
+  } catch (e: any) {
+    // A branch above may have already flipped its own `viewX` flag `true`
+    // (several do, as their very first line) before throwing further down —
+    // so `hasView` is forced back to `false` explicitly here rather than
+    // trusted from whatever partial state `out` ended up in, and `Views`
+    // (`ui/views/index.tsx`) checks `viewCrashed` BEFORE `hasView` for the
+    // same reason: neither one lets a half-built row array reach render.
+    return { ...out, hasView: false, viewCrashed: { view: v, name: e?.name || 'Error', message: e?.message ?? String(e) } };
+  }
+  out.hasView = out.viewItin || out.viewRoom || out.viewCaps || out.viewLog || out.viewDelta || out.viewSeat || out.viewPick || out.viewTrek || out.viewChk || out.viewEvents || out.viewErr || out.viewOut || out.viewMoney || out.viewFiles || out.viewShare;
+  return out;
+}
+
+function viewValsBody(this: any, v: any, d: any, ref: any, badge: any, out: any): void {
   if (v === 'money' && d) {
     out.viewMoney = true;
     const rows: any[] = [];
@@ -250,31 +325,102 @@ export function viewVals(this: any): any {
   } else if (v === 'files' && d) {
     out.viewFiles = true; out.viewTitle = 'Files';
     out.viewSub = '10 MB max · five content types · presigned PUT lives 15 minutes';
-    out.fileRows = this.sim.files.map((f: any) => ({ key: f.key, meta: f.contentType + ' · ' + Math.round(f.sizeBytes / 1024) + ' KB · ' + f.purpose, status: f.status, bg: f.status === 'READY' ? '#e8f7ef' : '#fef4e3', fg: f.status === 'READY' ? '#197d4b' : '#b45309' }));
+    if (this.state.mode === 'sim') {
+      out.fileRows = this.sim.files.map((f: any) => ({ key: f.key, meta: f.contentType + ' · ' + Math.round(f.sizeBytes / 1024) + ' KB · ' + f.purpose, status: f.status, bg: f.status === 'READY' ? '#e8f7ef' : '#fef4e3', fg: f.status === 'READY' ? '#197d4b' : '#b45309' }));
+    } else {
+      // `this.sim.files` is seeded with a FIXTURE row at construction time
+      // (sim/seed.ts) regardless of mode — rendering it here in Connected
+      // mode would show a fabricated file sitting right next to whatever
+      // this real call actually did, exactly the fake-alongside-real state
+      // the never-fake invariant exists to rule out. None of files.request/
+      // confirm/read's live() calls write into `this.sim.files` either (they
+      // only return the one real result), and Connected mode has no "list
+      // every file" endpoint at all to show a real board from — so this
+      // renders THIS call's own single result, honestly, rather than a
+      // fabricated list.
+      const status = String(d.status || d.confirmedStatus || 'PENDING').toUpperCase();
+      const metaBits = [
+        d.contentType,
+        d.sizeBytes !== undefined ? Math.round(d.sizeBytes / 1024) + ' KB' : null,
+        d.getUrl ? 'signed GET ready' : null
+      ].filter(Boolean);
+      out.fileRows = [{
+        key: d.fileKey || 'unknown',
+        meta: metaBits.length ? metaBits.join(' · ') : 'this call’s own result — Connected mode has no files-list endpoint',
+        status, bg: status === 'READY' ? '#e8f7ef' : '#fef4e3', fg: status === 'READY' ? '#197d4b' : '#b45309'
+      }];
+    }
     if (!out.fileRows.length) out.fileRows = [{ key: 'nothing yet', meta: 'request an upload to start', status: 'EMPTY', bg: '#fafaf9', fg: '#8f8f8f' }];
   } else if (v === 'share' && d) {
     out.viewShare = true; out.viewTitle = 'Share links';
     out.viewSub = d.expiryClamped ? 'the server clamped this expiry forward — a link cannot die before the trip does' : 'opaque, config-scoped, self-filtering';
-    out.shareRows = this.sim.share.map((s: any) => ({ token: s.token.slice(0, 14) + '…', meta: s.subject + ' · ' + s.tripRef + ' · expires ' + String(s.expiresAt).slice(0, 10), status: s.status, bg: s.status === 'REVOKED' ? '#fef3f2' : '#e8f7ef', fg: s.status === 'REVOKED' ? '#b3312f' : '#197d4b' }));
+    // `this.sim.share` is seeded with a FIXTURE token at construction time
+    // (sim/seed.ts) regardless of mode. In Simulated mode that fixture is
+    // legitimate, permanent demo content. In Connected mode it would show a
+    // fabricated share link alongside any real ones this session actually
+    // minted — `share.create`'s `live()` deliberately pushes every REAL
+    // token it mints into this same array carrying a real `.id` (see
+    // share.ts's header), which the fixture (and every simulated `run()`
+    // token) never has — so filtering on `.id`'s presence in Connected mode
+    // keeps the real rows and drops the fake one, without needing a second
+    // store.
+    const rows = this.state.mode === 'sim' ? this.sim.share : this.sim.share.filter((s: any) => s.id);
+    out.shareRows = rows.map((s: any) => ({ token: s.token.slice(0, 14) + '…', meta: s.subject + ' · ' + s.tripRef + ' · expires ' + String(s.expiresAt).slice(0, 10), status: s.status, bg: s.status === 'REVOKED' ? '#fef3f2' : '#e8f7ef', fg: s.status === 'REVOKED' ? '#b3312f' : '#197d4b' }));
     if (!out.shareRows.length) out.shareRows = [{ token: 'none yet', meta: 'mint one to see it here', status: 'EMPTY', bg: '#fafaf9', fg: '#8f8f8f' }];
   } else if (v === 'chk' && d) {
     out.viewChk = true; out.viewTitle = 'Trip checklist';
-    out.viewSub = d.aggregate ? d.aggregate.complete + ' of ' + d.aggregate.total + ' complete · ' + d.aggregate.reservedSections + ' reserved sections, seeded at ingest' : 'gate derives from the section’s phase';
-    const c = this.ensureChk(ref);
-    const secs = c ? c.sections : (d.sections || []);
-    out.chkRows = secs.map((s: any) => ({
-      title: s.title, meta: s.phase + ' → ' + s.gate + ' · ' + s.audience + ' · sourceSectionId ' + String(s.sourceSectionId),
-      items: s.items.map((i: any) => ({ title: i.title, status: i.status, id: i.id, bg: i.status === 'COMPLETE' ? '#e8f7ef' : '#f2f1ef', fg: i.status === 'COMPLETE' ? '#197d4b' : '#6f6f6f' })),
-      empty: !s.items.length
-    }));
-    out.chkEmptyTpl = !!(d.templates && !d.templates.length);
+    // Simulator shape: `d.aggregate = {total, complete, reservedSections}`.
+    // Real engine shape (`ChecklistAggregate`, checklists.ts's `read`): the
+    // same total/complete pair lives at `d.progress`, un-nested, and there
+    // is no `reservedSections` concept at all — never guessed, only shown
+    // when the simulator's own field is the one actually present.
+    const progress = d.aggregate || d.progress;
+    out.viewSub = progress
+      ? progress.complete + ' of ' + progress.total + ' complete' + (d.aggregate ? ' · ' + d.aggregate.reservedSections + ' reserved sections, seeded at ingest' : '')
+      : 'gate derives from the section’s phase';
+    // `d.sections` itself is real in both modes (the simulator's own `run()`
+    // returns the same `chk.sections` `ensureChk` would, so reading it
+    // straight off `d` costs nothing there) — the shape that differs is
+    // whether each section already carries its own nested `items[]`.
+    //   simulator fixture: sections[] each with a nested items[]
+    //   real engine:        sections[] with NO items key, plus a FLAT
+    //                       top-level items[] where each item carries its
+    //                       own sectionId (confirmed on the wire against a
+    //                       real trip's checklists.read)
+    // Grouping the flat array by sectionId normalises the real shape onto
+    // the simulator's without touching the simulator's own path at all.
+    const rawSections = d.sections || [];
+    const itemsBySection: Record<string, any[]> = {};
+    (d.items || []).forEach((i: any) => { (itemsBySection[i.sectionId] || (itemsBySection[i.sectionId] = [])).push(i); });
+    out.chkRows = rawSections.map((s: any) => {
+      const items = s.items || itemsBySection[s.id] || [];
+      return {
+        title: s.title, meta: s.phase + ' → ' + (s.gate || this.GATE[s.phase] || '—') + ' · ' + s.audience + ' · sourceSectionId ' + String(s.sourceSectionId),
+        items: items.map((i: any) => ({ title: i.title, status: i.status, id: i.id, bg: i.status === 'COMPLETE' ? '#e8f7ef' : '#f2f1ef', fg: i.status === 'COMPLETE' ? '#197d4b' : '#6f6f6f' })),
+        empty: !items.length
+      };
+    });
+    // Simulator's `checklists.tpl` puts its list at `d.templates`; the real
+    // engine's `checklists.read` (ChecklistAggregate) calls the same list
+    // `availableTemplates` instead — checked either way rather than only
+    // ever matching the simulator's own key.
+    const templates = d.templates || d.availableTemplates;
+    out.chkEmptyTpl = !!(templates && !templates.length);
   } else if (v === 'events' && d) {
     out.viewEvents = true; out.viewTitle = 'Events & deliveries';
-    out.viewSub = d.newEvents !== undefined ? d.writes + ' writes → ' + d.newEvents + ' new event(s), ' + d.editsFolded + ' edits folded into one' : 'distinct eventId is the count that means something';
+    // `webhooks.burst`'s real `live()` reports `editsFolded: null` — a real,
+    // deliberate absence (the real `EventEnvelopeResponse` has no per-event
+    // fold counter), not `undefined` — so it is checked for explicitly
+    // rather than string-concatenated as the literal text "null".
+    out.viewSub = d.newEvents !== undefined
+      ? d.writes + ' writes → ' + d.newEvents + ' new event(s)' + (d.editsFolded != null ? ', ' + d.editsFolded + ' edits folded into one' : ' (editsFolded has no real-engine equivalent — see newEvents staying flat instead)')
+      : 'distinct eventId is the count that means something';
     const rows = d.events || d.deliveries || [];
     out.eventRows = rows.map((r: any) => ({
       id: r.eventId || r.deliveryId, kind: r.type || ('delivery · attempt ' + r.attempt),
-      detail: r.editsFolded !== undefined ? r.editsFolded + ' edits folded · ' + String(r.at).slice(11, 19) : (r.eventId ? 'event ' + r.eventId + ' · status ' + r.status : String(r.at).slice(11, 19)),
+      detail: r.editsFolded != null
+        ? r.editsFolded + ' edits folded · ' + String(r.at).slice(11, 19)
+        : (r.eventId !== undefined ? 'event ' + r.eventId + (r.status !== undefined ? ' · status ' + r.status : '') + ' · ' + String(r.at).slice(11, 19) : String(r.at).slice(11, 19)),
       bg: '#fff', fg: '#197d4b'
     }));
     if (!out.eventRows.length) { out.eventRows = [{ id: 'nothing yet', kind: 'run the coalescing burst first', detail: '', bg: '#fafaf9', fg: '#8f8f8f' }]; }
@@ -294,28 +440,103 @@ export function viewVals(this: any): any {
   } else if (v === 'seat' && d) {
     out.viewSeat = true; out.viewTitle = 'Fleet';
     out.viewSub = (d.seatPendingCount !== undefined ? d.seatPendingCount + ' seat-pending · ' : '') + 'a vehicle with no grid is complete, not incomplete';
-    const fleet = this.ensureSeat(ref) || { vehicles: [] };
-    out.seatRows = fleet.vehicles.map((x: any) => ({
-      label: x.label, meta: x.type + ' · ' + (x.seatMap ? x.layout + ' · ' + x.seatMap.length + ' seats' : 'no seat grid') + ' · cap ' + x.capacity,
-      gridBg: x.seatMap ? '#fff' : '#fafaf9',
-      seats: x.seatMap
-        ? x.seatMap.map((l: any) => { const a = (x.assignments || []).find((y: any) => y.seatLabel === l); return { label: l, glyph: a ? a.glyph : l, st: a ? this.chipStyle(a.tone) : { background: '#fafaf9', color: '#c9c7c3' }, title: a ? a.fullName + ' · ' + l : 'seat ' + l + ' free' }; })
-        : (x.assignments || []).map((a: any) => ({ label: '', glyph: a.glyph, st: this.chipStyle(a.tone), title: a.fullName + ' · seatLabel null — on ' + x.label })),
-      noGrid: !x.seatMap, empty: !(x.assignments || []).length && !x.seatMap
-    }));
+    // `d.vehicles` is present, correctly, in both modes (`seating.read`'s
+    // simulated `run()` returns `{vehicles: s.vehicles, ...}` and its
+    // `live()` returns the real engine's `SeatingBoard.vehicles`) — the old
+    // code ignored `d` entirely and always called `ensureSeat(ref)`, which
+    // returns null for any real trip, silently rendering an empty fleet
+    // while the response panel showed a real, populated one right next to
+    // it (the same class of bug 'room' had, immediately above).
+    //
+    // The PER-VEHICLE shape genuinely differs between the two, though —
+    // this part is not just a missing-read bug:
+    //   simulator `Vehicle`: `seatMap` (a bare array of seat labels, or
+    //     null) + `assignments` (occupants, each carrying its own
+    //     `seatLabel`).
+    //   real engine `Vehicle` (`on-ground/types.ts`, confirmed against the
+    //     wire shape): `seatMapped` (boolean) + `seats` (SeatingSeat[],
+    //     occupant nested per seat) + `occupants` (people on the vehicle
+    //     with no grid) + `unseatedOnVehicle` (people on a MAPPED vehicle
+    //     who still have no seat of their own). `seats`/`unseatedOnVehicle`
+    //     and `occupants` are mutually exclusive by `seatMapped` and BOTH
+    //     always present — never branch on either array's length.
+    // `'seatMapped' in x` distinguishes the two (the simulator's own
+    // vehicles never carry that key) so this renders whichever shape it was
+    // actually handed, real or simulated, never one pretending to be the
+    // other.
+    const vehicles = d.vehicles || [];
+    out.seatRows = vehicles.map((x: any) => {
+      const isReal = 'seatMapped' in x;
+      const mapped = isReal ? !!x.seatMapped : !!x.seatMap;
+      const label = x.label || x.regNo || x.id;
+      // The seat GRID's own size (for "TWO_TWO · 20 seats" in the meta
+      // line) is distinct from how many people are actually on the
+      // vehicle — real `unseatedOnVehicle` riders are on the vehicle but
+      // outside the grid, so they count toward occupancy, never toward
+      // the grid size.
+      const gridSize = isReal ? (x.seats || []).length : (x.seatMap ? x.seatMap.length : 0);
+      let seats: any[];
+      let noGridOccupantCount: number;
+      if (isReal) {
+        const unseated = x.unseatedOnVehicle || [];
+        seats = mapped
+          ? (x.seats || []).map((seat: any) => ({
+            label: seat.seatLabel, glyph: seat.occupant ? seat.occupant.glyph : seat.seatLabel,
+            st: seat.occupant ? this.chipStyle(seat.occupant.tone) : { background: '#fafaf9', color: '#c9c7c3' },
+            title: seat.occupant ? seat.occupant.fullName + ' · ' + seat.seatLabel : 'seat ' + seat.seatLabel + ' free'
+          })).concat(unseated.map((a: any) => ({ label: '', glyph: a.glyph, st: this.chipStyle(a.tone), title: a.fullName + ' · seatLabel null — on ' + label })))
+          : (x.occupants || []).map((a: any) => ({ label: '', glyph: a.glyph, st: this.chipStyle(a.tone), title: a.fullName + ' · seatLabel null — on ' + label }));
+        noGridOccupantCount = (x.occupants || []).length;
+      } else {
+        seats = x.seatMap
+          ? x.seatMap.map((l: any) => { const a = (x.assignments || []).find((y: any) => y.seatLabel === l); return { label: l, glyph: a ? a.glyph : l, st: a ? this.chipStyle(a.tone) : { background: '#fafaf9', color: '#c9c7c3' }, title: a ? a.fullName + ' · ' + l : 'seat ' + l + ' free' }; })
+          : (x.assignments || []).map((a: any) => ({ label: '', glyph: a.glyph, st: this.chipStyle(a.tone), title: a.fullName + ' · seatLabel null — on ' + label }));
+        noGridOccupantCount = (x.assignments || []).length;
+      }
+      return {
+        label,
+        meta: x.type + ' · ' + (mapped ? x.layout + ' · ' + gridSize + ' seats' : 'no seat grid') + ' · cap ' + x.capacity,
+        gridBg: mapped ? '#fff' : '#fafaf9',
+        seats,
+        noGrid: !mapped,
+        empty: !mapped && !noGridOccupantCount
+      };
+    });
   } else if (v === 'pick' && d) {
     out.viewPick = true; out.viewTitle = 'Pickup stops';
     out.viewSub = 'PENDING is the state every close policy is about';
-    let src = Array.isArray(d) ? d : null;
-    if (!src) { const k = this.ensurePick(ref); src = k ? k.stops : []; }
-    out.pickRows = (src || []).map((s: any) => ({
-      name: s.name, meta: s.scheduledTime + ' · ' + s.status,
-      stBg: s.status === 'CLOSED' ? '#f2f1ef' : '#e8f7ef', stFg: s.status === 'CLOSED' ? '#6f6f6f' : '#197d4b',
-      people: s.travellers.map((t: any) => ({
-        glyph: t.glyph, st: this.chipStyle(t.tone), title: t.fullName + ' · ' + t.status,
-        badge: t.status, bBg: t.status === 'BOARDED' ? '#e8f7ef' : t.status === 'PENDING' ? '#fef4e3' : '#fef3f2', bFg: t.status === 'BOARDED' ? '#197d4b' : t.status === 'PENDING' ? '#b45309' : '#b3312f'
-      }))
-    }));
+    // `pickups.list` is the only method here whose `d` is the stop array
+    // itself (both simulator and live) — every other method (board/close/
+    // assign/reopen) answers a single result, not a board, so there is
+    // nothing list-shaped in `d` to render and this view stays empty rather
+    // than reaching into the simulator's store for a trip Connected mode
+    // has no relationship to.
+    const src: any[] = Array.isArray(d) ? d : [];
+    out.pickRows = src.map((s: any) => {
+      // Simulator fixture: each stop carries a nested `travellers[]`. The
+      // real engine's `PickupStop` (on-ground/types.ts, confirmed on the
+      // wire) has NO per-traveller list at all — only rollup counts
+      // (`boardedCount`/`expectedCount`/`rollup`) — so `s.travellers.map(...)`
+      // threw a TypeError on every real trip. There is no live equivalent of
+      // the simulator's per-traveller chips to fall back to, so the honest
+      // real-mode render is the aggregate counts and an empty chip row,
+      // never a fabricated roster.
+      const hasTravellers = Array.isArray(s.travellers);
+      const when = typeof s.scheduledTime === 'string' && s.scheduledTime.includes('T')
+        ? s.scheduledTime.slice(11, 16)
+        : s.scheduledTime;
+      return {
+        name: s.name,
+        meta: when + ' · ' + s.status + (hasTravellers ? '' : ' · ' + s.boardedCount + '/' + s.expectedCount + ' boarded'),
+        stBg: s.status === 'CLOSED' ? '#f2f1ef' : '#e8f7ef', stFg: s.status === 'CLOSED' ? '#6f6f6f' : '#197d4b',
+        people: hasTravellers
+          ? s.travellers.map((t: any) => ({
+            glyph: t.glyph, st: this.chipStyle(t.tone), title: t.fullName + ' · ' + t.status,
+            badge: t.status, bBg: t.status === 'BOARDED' ? '#e8f7ef' : t.status === 'PENDING' ? '#fef4e3' : '#fef3f2', bFg: t.status === 'BOARDED' ? '#197d4b' : t.status === 'PENDING' ? '#b45309' : '#b3312f'
+          }))
+          : []
+      };
+    });
   } else if (v === 'trek' && d) {
     out.viewTrek = true; out.viewTitle = 'Trek';
     out.viewSub = d.ripple ? 'postponed by ' + d.ripple.itineraryDaysMoved + ' days of itinerary · pickup times untouched' : 'resolved through the active sentinel';
@@ -343,21 +564,33 @@ export function viewVals(this: any): any {
       empty: !(day.items || []).length
     }));
   } else if (v === 'room' && d) {
-    const board = this.ensureRoom(ref) || { rooms: [], unassigned: [] };
-    const assigned = board.rooms.reduce((n: number, r: any) => n + r.beds.filter((x: any) => x.occupant).length, 0);
+    // `d.rooms`/`d.unassigned` are already the right shape in BOTH modes —
+    // `rooming.read`'s simulated `run()` returns `{rooms: b.rooms, unassigned:
+    // b.unassigned, ...}` (the exact objects `ensureRoom` holds) and its
+    // `live()` returns the real engine's `RoomingBoard.rooms`/`.unassigned`
+    // in the identical field names (`on-ground/types.ts`'s `Room`/`Bed`/
+    // `Occupant` — confirmed on the wire). Reading `d` directly — rather
+    // than always calling `ensureRoom(ref)`, which returns null for any ref
+    // that is not a SIMULATOR fixture trip — is what fixes Connected mode:
+    // the old code ignored `d` entirely and fell back to an always-empty
+    // board for a real trip, silently rendering EMPTY while the response
+    // panel showed a real, populated one right next to it.
+    const rooms = d.rooms || [];
+    const unassigned = d.unassigned || [];
+    const assigned = rooms.reduce((n: number, r: any) => n + (r.beds || []).filter((x: any) => x.occupant).length, 0);
     out.viewRoom = true;
     out.viewTitle = 'Rooming board';
-    out.viewSub = assigned + ' of ' + (assigned + board.unassigned.length) + ' travellers have a bed · ' + board.unassigned.length + ' unassigned';
-    out.roomRows = board.rooms.map((r: any) => ({
+    out.viewSub = assigned + ' of ' + (assigned + unassigned.length) + ' travellers have a bed · ' + unassigned.length + ' unassigned';
+    out.roomRows = rooms.map((r: any) => ({
       code: r.code, meta: r.roomType + ' · cap ' + r.capacity + ' · ' + r.status,
-      beds: r.beds.map((b: any) => ({
+      beds: (r.beds || []).map((b: any) => ({
         label: b.bedLabel, glyph: b.occupant ? b.occupant.glyph : '·',
         st: b.occupant ? this.chipStyle(b.occupant.tone) : { background: '#fafaf9', color: '#c9c7c3' },
         title: b.occupant ? b.occupant.fullName + ' — tone "' + b.occupant.tone + '", ' + b.occupant.assignSource : 'free'
       }))
     }));
-    if (board.unassigned.length) {
-      out.roomRows.push({ code: 'unassigned', meta: board.unassigned.length + ' with no bed yet', beds: board.unassigned.map((o: any) => ({ label: '', glyph: o.glyph, st: this.chipStyle(o.tone), title: o.fullName + ' — tone "' + o.tone + '"' })) });
+    if (unassigned.length) {
+      out.roomRows.push({ code: 'unassigned', meta: unassigned.length + ' with no bed yet', beds: unassigned.map((o: any) => ({ label: '', glyph: o.glyph, st: this.chipStyle(o.tone), title: o.fullName + ' — tone "' + o.tone + '"' })) });
     }
   } else if (v === 'caps' && Array.isArray(d)) {
     out.viewCaps = true; out.viewTitle = 'Capabilities · four axes';
@@ -378,8 +611,6 @@ export function viewVals(this: any): any {
       ? { kind: 'tombstone', label: r.id, detail: 'deleted at ' + String(r.deletedAt).slice(11, 19) + ' · version ' + r.version, bg: '#fef3f2', fg: '#b3312f' }
       : { kind: 'row', label: r.id + ' · ' + r.title, detail: 'sortOrder ' + r.sortOrder + ' · ' + r.status + ' · version ' + r.version, bg: '#fff', fg: '#197d4b' });
   }
-  out.hasView = out.viewItin || out.viewRoom || out.viewCaps || out.viewLog || out.viewDelta || out.viewSeat || out.viewPick || out.viewTrek || out.viewChk || out.viewEvents || out.viewErr || out.viewOut || out.viewMoney || out.viewFiles || out.viewShare;
-  return out;
 }
 
 export function activeMethod(this: any): any {
@@ -502,7 +733,7 @@ export function renderVals(this: any): any {
     modeHintText: sim ? 'no setup needed' : transportBackendUrl(),
     sessSub: sim
       ? 'prt_8f21c4 · simulated CRM'
-      : (liveSession ? 'prt_8f21c4 · session open · ' + liveSession.tripRef : 'prt_8f21c4 · not connected — mint a session first'),
+      : (liveSession ? 'prt_8f21c4 · session open · ' + liveSession.managerRef : 'prt_8f21c4 · not connected — mint a session first'),
     sessDot: sim ? '#f5c33b' : (liveSession ? '#4fb286' : '#c9c7c3')
   };
 }
