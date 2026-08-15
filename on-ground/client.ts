@@ -69,6 +69,7 @@ import type {
   FloatLedgerList,
   FloatMovement,
   FloatSummaryList,
+  Gender,
   ItineraryRead,
   OnGroundResponse,
   PickupAssignResult,
@@ -77,8 +78,10 @@ import type {
   PickupKind,
   PickupStop,
   PostponeResult,
+  ReopenResult,
   ReorderResult,
   Room,
+  RoomingAssignResult,
   RoomingBoard,
   SeatingAssignResult,
   SeatingAutoAssignResult,
@@ -88,6 +91,8 @@ import type {
   Vehicle,
   VehicleLayout,
   VehicleType,
+  WalkInMetaResult,
+  WalkInResult,
 } from './types';
 
 /**
@@ -195,6 +200,15 @@ export interface OnGroundClient {
       stayWindowId: string;
       dryRun: boolean;
     }): Promise<OnGroundResponse<AutoAssignResult>>;
+    /** `bedLabel: null` unassigns; a free target bed moves; an occupied
+     * target bed swaps atomically — one endpoint, decided by the body. See
+     * `RoomingAssignResult`'s own doc in `./types.ts`. */
+    assign(args: {
+      tripRef: string;
+      travellerId: string;
+      roomId: string;
+      bedLabel: string | null;
+    }): Promise<OnGroundResponse<RoomingAssignResult>>;
   };
   /**
    * Added for the 10B boarding-day walkthrough. See `./types.ts`'s header on
@@ -261,6 +275,10 @@ export interface OnGroundClient {
       confirm?: boolean;
       confirmedHeadCount?: number;
     }): Promise<OnGroundResponse<PickupCloseResult>>;
+    /** Flips `CLOSED → OPEN`; reopening an already-`OPEN` stop is a no-op,
+     * never a conflict. No `ifMatch` — same reason `closeStop` above has
+     * none: this is a `POST`, guarded by `Idempotency-Key` instead. */
+    reopenStop(args: { tripRef: string; pointId: string }): Promise<OnGroundResponse<ReopenResult>>;
   };
   readonly treks: {
     board(args: { trekRef: string }): Promise<OnGroundResponse<TrekBoard>>;
@@ -270,6 +288,18 @@ export interface OnGroundClient {
       newEndDate: string;
       reason: string;
     }): Promise<OnGroundResponse<PostponeResult>>;
+    walkIns: {
+      create(args: {
+        trekRef: string;
+        name: string;
+        phone?: string;
+        pickupPointId?: string;
+        gender?: Gender | null;
+        dietary?: string | null;
+        medicalFlag?: boolean;
+      }): Promise<OnGroundResponse<WalkInResult>>;
+      meta(args: { trekRef: string }): Promise<OnGroundResponse<WalkInMetaResult>>;
+    };
   };
   /**
    * Added for the Phase 10C checklist walkthrough. `kaafil.checklists` now
@@ -637,6 +667,14 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
           body: { stayWindowId, dryRun },
         });
       },
+      // operationId: assignRoomingBed
+      async assign({ tripRef, travellerId, roomId, bedLabel }) {
+        return request<RoomingAssignResult>({
+          method: 'POST',
+          path: roomingPath(tripRef, '/assign'),
+          body: { travellerId, roomId, bedLabel },
+        });
+      },
     },
     seating: {
       async board({ tripRef, since }) {
@@ -733,6 +771,14 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
           },
         });
       },
+      // operationId: reopenPickupStop
+      async reopenStop({ tripRef, pointId }) {
+        return request<ReopenResult>({
+          method: 'POST',
+          path: pickupsPath(tripRef, `/${encodeURIComponent(pointId)}/reopen`),
+          body: {},
+        });
+      },
     },
     treks: {
       async board({ trekRef }) {
@@ -747,6 +793,30 @@ export function createOnGroundClient(options: OnGroundClientOptions): OnGroundCl
           path: treksPath(trekRef, '/postpone'),
           body: { newStartDate, newEndDate, reason },
         });
+      },
+      walkIns: {
+        // operationId: createTrekWalkIn
+        async create({ trekRef, name, phone, pickupPointId, gender, dietary, medicalFlag }) {
+          return request<WalkInResult>({
+            method: 'POST',
+            path: treksPath(trekRef, '/walk-ins'),
+            body: {
+              name,
+              ...(phone !== undefined ? { phone } : {}),
+              ...(pickupPointId !== undefined ? { pickupPointId } : {}),
+              ...(gender !== undefined ? { gender } : {}),
+              ...(dietary !== undefined ? { dietary } : {}),
+              ...(medicalFlag !== undefined ? { medicalFlag } : {}),
+            },
+          });
+        },
+        // operationId: readTrekWalkInMeta
+        async meta({ trekRef }) {
+          return request<WalkInMetaResult>({
+            method: 'GET',
+            path: treksPath(trekRef, '/walk-ins/meta'),
+          });
+        },
       },
     },
     checklists: {

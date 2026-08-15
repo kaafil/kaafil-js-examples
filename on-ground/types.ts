@@ -267,6 +267,24 @@ export interface AutoAssignResult {
   readonly deltas: { readonly assigned: number; readonly movedFromPrevious: number };
 }
 
+/**
+ * `POST rooming/assign`'s response. `roomId`/`bedLabel` null means an
+ * UNASSIGN just happened; `displaced*` non-null means the target bed was
+ * occupied and this was an atomic SWAP (§`assignRoomingBed`'s own doc).
+ * `rooms` carries every affected room WHOLE, so a caller rebases the board
+ * without a follow-up read.
+ */
+export interface RoomingAssignResult {
+  readonly stayWindowId: string;
+  readonly travellerId: string;
+  readonly roomId: string | null;
+  readonly bedLabel: string | null;
+  readonly displacedTravellerId: string | null;
+  readonly displacedRoomId: string | null;
+  readonly displacedBedLabel: string | null;
+  readonly rooms: readonly Room[];
+}
+
 // ── transport-seating (10B) ──────────────────────────────────────────────────
 //
 // Added for Phase 10B's boarding-day walkthrough. `kaafil-js` does not yet
@@ -456,6 +474,13 @@ export interface PickupCloseResult {
   readonly reopened: boolean;
 }
 
+/** `POST pickups/:pointId/reopen`'s response — flips `CLOSED → OPEN` and
+ * clears `closedAt`/`closedByManagerId`; reopening an already-`OPEN` stop is
+ * a no-op, never a conflict (§`reopenPickupStop`'s own doc). */
+export interface ReopenResult {
+  readonly stop: PickupStop;
+}
+
 // ── treks (10B) ───────────────────────────────────────────────────────────────
 
 export type TrekPhase = 'pre_departure' | 'boarding' | 'in_trek' | 'closing';
@@ -502,6 +527,42 @@ export interface PostponeResult {
     readonly stayWindowsShifted: number;
   };
   readonly version: number;
+}
+
+/**
+ * `POST treks/:trekRef/walk-ins`'s response. `phone`/`pickupPointId` are
+ * whatever the request supplied, echoed back — never re-derived.
+ * `needsReconciliation` starts `true` and is cleared later by a matching CRM
+ * upsert, which emits no event of its own (§`createTrekWalkIn`'s own doc).
+ */
+export interface WalkInResult {
+  readonly walkInId: string;
+  readonly travellerId: string;
+  readonly name: string;
+  readonly phone: string | null;
+  readonly pickupPointId: string | null;
+  readonly needsReconciliation: boolean;
+  readonly version: number;
+  readonly createdAt: string;
+}
+
+export interface WalkInPickupPointOption {
+  readonly id: string;
+  readonly kind: PickupKind;
+  readonly name: string;
+  readonly status: PickupStopStatus;
+}
+
+/** `GET treks/:trekRef/walk-ins/meta`'s response — the walk-in form's own
+ * pickup options and field hints. `fieldHints.phone.required` reflects the
+ * agency's `treks.walkIn.requirePhone` knob (default `false`). */
+export interface WalkInMetaResult {
+  readonly pickupPointOptions: readonly WalkInPickupPointOption[];
+  readonly fieldHints: {
+    readonly name: { readonly required: true };
+    readonly phone: { readonly required: boolean; readonly isCrmMatchKey: true };
+  };
+  readonly reconciliationNotice: string;
 }
 
 // ── checklists (10C) ──────────────────────────────────────────────────────────

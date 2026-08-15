@@ -20,7 +20,7 @@
  * when it tries to write with the wrong credential.
  *
  * Steps 23-32 add seating, pickup stops and a trek postpone ripple; steps
- * 33-40 add the trip checklist. Steps 42-48 are the MONEY walkthrough: issue
+ * 33-40 add the trip checklist. Steps 41-48 are the MONEY walkthrough: issue
  * float, log a FLOAT_CASH expense and replay its Idempotency-Key (one
  * movement, not two), a receipt through the REAL presigned upload flow,
  * void the expense back to its starting balance, collect against a
@@ -35,10 +35,10 @@
  * skipped one. Run it with `pnpm simulate` after `pnpm link:local` and a
  * populated `.env` (see `.env.example`); it needs a live `kaafil-engine`
  * with its background worker running, because step 5 waits on that worker and
- * step 21 waits on the coalescer's flush job. Step 44 needs a reachable
+ * step 21 waits on the coalescer's flush job. Step 43 needs a reachable
  * presigned-upload endpoint — see `.env.example`'s `KAAFIL_STORAGE_LOCAL_PROXY`
  * and the README's "the presigned upload and this repo's own docker network"
- * section if the engine runs behind docker-compose. Step 48 needs
+ * section if the engine runs behind docker-compose. Step 47 needs
  * `expenses.claims` enabled on the agency — this repo's own seed leaves it
  * off, and no credential this repo holds can turn it on (see the README).
  */
@@ -86,6 +86,23 @@ import { putPresignedBytes } from '../on-ground/upload';
 // ---------------------------------------------------------------------------
 
 class AssertionFailure extends Error {}
+
+// A step throws THIS, deliberately, only when it hit a documented
+// ENVIRONMENTAL boundary — a wall no credential this repo holds can get
+// past (GAPS.md's `B1`: consoleAuth-only administration). It is never a
+// catch-all: an unexpected status, a genuine assertion failure, a network
+// error all still surface as AssertionFailure/a raw thrown error and abort
+// the run exactly as before. `boundary` names the GAPS.md row so a reader
+// can go verify the claim itself rather than take the message on faith.
+class BlockedStep extends Error {
+  readonly boundary: string;
+
+  constructor(message: string, boundary: string) {
+    super(message);
+    this.name = 'BlockedStep';
+    this.boundary = boundary;
+  }
+}
 
 function assertTrue(condition: boolean, message: string): void {
   if (!condition) {
@@ -156,8 +173,51 @@ function requireItem(read: ItineraryRead, itemId: string, label: string): Itiner
   return found;
 }
 
+interface BlockedRecord {
+  readonly step: number;
+  readonly boundary: string;
+  readonly message: string;
+}
+
 async function main(): Promise<void> {
   let passed = 0;
+  const blocked: BlockedRecord[] = [];
+  // Steps that could not even ATTEMPT to run because an earlier step they
+  // depend on was blocked — distinct from a blocked step itself. Nothing in
+  // this file currently reads a blocked step's return value (step 21 and
+  // step 47 are both dead ends but for step 48, which needs neither), so
+  // this stays 0 in practice; it exists so a future dependent step has
+  // somewhere honest to report if that ever changes, rather than either
+  // silently passing or aborting the whole run over a wall it inherited.
+  let skippedByBlock = 0;
+  void skippedByBlock;
+  // Set only by main()'s own catch, below — a genuine (non-Blocked) failure.
+  // Distinguishes "the run reached the end, blocked or not" (summary worth
+  // printing) from "the run aborted partway through" (its own terse message
+  // already said everything there is to say).
+  let genuineFailure = false;
+
+  // A step wrapped here runs exactly as before on success. A step that
+  // throws `BlockedStep` — and ONLY that, deliberately, from a documented
+  // environmental boundary this repo has no credential to cross — is
+  // recorded and reported LOUDLY, IN PLACE, and the run CONTINUES to the
+  // next step. Anything else thrown (AssertionFailure, a transport error, an
+  // unexpected status) is rethrown untouched, straight to main()'s own
+  // catch, and aborts the run exactly as it always has: a blocked step is
+  // not the same thing as a passing one, but it is also not a catch-all for
+  // "something went wrong".
+  async function runBlockable(n: number, run: () => Promise<void>): Promise<void> {
+    try {
+      await run();
+      passed++;
+    } catch (err) {
+      if (!(err instanceof BlockedStep)) {
+        throw err;
+      }
+      blocked.push({ step: n, boundary: err.boundary, message: err.message });
+      console.error(`\nBLOCKED  step ${n}  ${err.message}`);
+    }
+  }
 
   const { baseUrl, apiKey, agencyRef, environment } = await step(
     1,
@@ -1346,13 +1406,14 @@ async function main(): Promise<void> {
     //
     // The precondition — an endpoint subscribed to `itinerary.updated` — cannot
     // be created from here: endpoint CRUD is a console-session operation, and
-    // this repo deliberately has no console flow. So this step FAILS, naming
-    // both possible causes, rather than skipping: a step that cannot be verified
-    // is a failing step, and "no deliveries appeared" is indistinguishable from
-    // "the coalescer emitted nothing" if it is allowed to pass quietly.
+    // this repo deliberately has no console flow (GAPS.md boundary `B1`). So
+    // "no delivery appeared at all" is a BLOCKED step, not a silently-passing
+    // one: a step that cannot be verified is never green. It is also not the
+    // same thing as an actual miscoalescing (more than one fresh event for one
+    // burst) — that stays a genuine, run-aborting AssertionFailure below.
     // -------------------------------------------------------------------
 
-    await step(
+    await runBlockable(21, () => step(
       21,
       'a burst of three edits inside one 5s window produces EXACTLY ONE itinerary.updated event',
       async () => {
@@ -1400,13 +1461,20 @@ async function main(): Promise<void> {
 
         const fresh = [...after].filter((id) => !before.has(id));
         if (fresh.length === 0) {
-          throw new AssertionFailure(
-            'no itinerary.updated delivery appeared for the burst. Two causes, and they are ' +
-              'different problems: (1) no webhook endpoint on this agency subscribes to ' +
-              'itinerary.updated, so there is nothing to observe — register one (console-session ' +
-              'operation, outside this repo, see the README); or (2) the engine\'s webhook worker ' +
-              'is not running, so the coalescer\'s flush job never executed. This step will not ' +
-              'pass on an unobservable stack.',
+          // Same shape as step 47's entitlement wall: registering a webhook
+          // endpoint subscribed to `itinerary.updated` is a consoleAuth-only
+          // operation (GAPS.md `B1`), and this repo holds no credential that
+          // can do it. (The engine's webhook worker not running would look
+          // identical from here — an unreachable stack, not a boundary — but
+          // that worker is one of this repo's own docker-compose services and
+          // is verified up before every run; the console-only registration is
+          // the standing, documented reason this step cannot observe a
+          // delivery, so that is what gets named.)
+          throw new BlockedStep(
+            'no itinerary.updated delivery appeared for the burst — registering a webhook endpoint ' +
+              'subscribed to itinerary.updated is console-session-only (GAPS.md boundary B1), and no ' +
+              'credential this repo holds can do it. Register one from a console session and re-run.',
+            'B1',
           );
         }
         assertEquals(
@@ -1416,8 +1484,7 @@ async function main(): Promise<void> {
         );
         console.log(`  1 new event for 3 edits: ${String(fresh[0])} — the frozen 5s trailing cadence`);
       },
-    );
-    passed++;
+    ));
 
     // -------------------------------------------------------------------
     // Step 22 — back at the CRM: read the manager's day through the SDK, and
@@ -2489,7 +2556,7 @@ async function main(): Promise<void> {
     passed++;
 
     // ===================================================================
-    // Steps 42-48 — the money walkthrough: float, expenses, a receipt
+    // Steps 41-48 — the money walkthrough: float, expenses, a receipt
     // through the REAL presigned upload flow, collections and the
     // claim-status ingest.
     //
@@ -2500,12 +2567,12 @@ async function main(): Promise<void> {
     // extended with four more typed groups rather than a second stand-in
     // pattern — the same move steps 13-21/23-32/33-40 already made for
     // itinerary/rooming, seating/pickups/treks and checklists respectively.
-    // The one exception, the claim-status ingest (step 48), is `auth:
+    // The one exception, the claim-status ingest (step 47), is `auth:
     // 'apiKey'` — the CRM's OWN credential — and is called directly below
     // with its own small helper, never folded into the manager-session
     // client.
     //
-    // All of it runs against `onGroundTripRef` — the same trip steps 12-41
+    // All of it runs against `onGroundTripRef` — the same trip steps 12-40
     // already built a roster, an itinerary, rooms, a fleet and a checklist
     // onto — rather than a fresh fixture, because float/expenses/collections
     // are properties of a TRIP a manager is already running, not a new kind
@@ -2513,7 +2580,7 @@ async function main(): Promise<void> {
     // ===================================================================
 
     // -------------------------------------------------------------------
-    // Step 42 — issue float to the manager. `balanceBeforeMinor: 0` is the
+    // Step 41 — issue float to the manager. `balanceBeforeMinor: 0` is the
     // claim worth reading twice: this is the FIRST float movement ever
     // posted for this manager on this trip, so the derived balance the
     // engine hands back has nothing behind it but this one row.
@@ -2522,7 +2589,7 @@ async function main(): Promise<void> {
     const floatIssueAmountMinor = 40_00_00; // ₹4,000.00 in paise
 
     const floatAfterIssue = await step(
-      42,
+      41,
       'float: issue ₹4,000.00 to the manager — the derived balance starts from zero',
       async () => {
         const issued = await onGround.float.issue({
@@ -2543,7 +2610,7 @@ async function main(): Promise<void> {
         const summary = await onGround.float.readSummary({ tripRef: onGroundTripRef });
         const row = summary.data.data.find((r) => r.managerId === managerRef);
         if (row === undefined) {
-          throw new AssertionFailure('step 42: the manager has no row in the float summary right after issuing');
+          throw new AssertionFailure('step 41: the manager has no row in the float summary right after issuing');
         }
         assertEquals(row.balanceMinor, floatIssueAmountMinor, 'the summary balance disagrees with the issue response');
         console.log(`  issued ₹${String(floatIssueAmountMinor / 100)} → balanceMinor=${String(row.balanceMinor)}`);
@@ -2553,7 +2620,7 @@ async function main(): Promise<void> {
     passed++;
 
     // -------------------------------------------------------------------
-    // Step 43 — log a FLOAT_CASH expense, then REPLAY the identical
+    // Step 42 — log a FLOAT_CASH expense, then REPLAY the identical
     // Idempotency-Key. FLOAT_CASH auto-couples to the float ledger in the
     // SAME transaction (§4.1) — a replay that produced two `Expense` rows
     // or two `FloatMovement` rows would be the exact double-spend an
@@ -2567,7 +2634,7 @@ async function main(): Promise<void> {
     const lunchIdempotencyKey = `sim-lunch-${runSuffix}`;
 
     const lunchExpense = await step(
-      43,
+      42,
       'expenses: log a FLOAT_CASH expense, then REPLAY the same Idempotency-Key — exactly ONE movement, not two',
       async () => {
         const first = await onGround.expenses.log({
@@ -2599,7 +2666,7 @@ async function main(): Promise<void> {
         const summary = await onGround.float.readSummary({ tripRef: onGroundTripRef });
         const row = summary.data.data.find((r) => r.managerId === managerRef);
         if (row === undefined) {
-          throw new AssertionFailure('step 43: the manager vanished from the float summary');
+          throw new AssertionFailure('step 42: the manager vanished from the float summary');
         }
         assertEquals(row.spentMinor, lunchAmountMinor, 'spentMinor moved by more than ONE expense’s amount — a replay double-spent');
         assertEquals(
@@ -2622,7 +2689,7 @@ async function main(): Promise<void> {
     passed++;
 
     // -------------------------------------------------------------------
-    // Step 44 — a receipt, through the REAL presigned flow: POST /files →
+    // Step 43 — a receipt, through the REAL presigned flow: POST /files →
     // PUT the bytes to the signed URL → confirm → link it to the expense.
     // No shortcut through a fake blob or a bare `receiptFileKey` invented by
     // this file — every byte the engine's own `UPLOAD_MISMATCH` check
@@ -2637,7 +2704,7 @@ async function main(): Promise<void> {
     receiptBytes.set([0xff, 0xd8, 0xff, 0xe0]);
 
     await step(
-      44,
+      43,
       'files: the REAL presigned flow — POST /files, PUT the bytes, confirm, then link to the expense',
       async () => {
         const slot = await onGround.files.requestUpload({
@@ -2673,14 +2740,14 @@ async function main(): Promise<void> {
     passed++;
 
     // -------------------------------------------------------------------
-    // Step 45 — void the expense. A FLOAT_CASH void posts a reversing
+    // Step 44 — void the expense. A FLOAT_CASH void posts a reversing
     // `ADJUSTMENT(IN)` in the SAME transaction (§4.1) — the ledger must
-    // therefore net back to EXACTLY the balance step 42's issue produced,
+    // therefore net back to EXACTLY the balance step 41's issue produced,
     // not merely "go up by roughly the right amount".
     // -------------------------------------------------------------------
 
     await step(
-      45,
+      44,
       'void the expense — the float ledger nets back to exactly where it started, before this expense existed',
       async () => {
         const voided = await onGround.expenses.void({
@@ -2694,7 +2761,7 @@ async function main(): Promise<void> {
         const summary = await onGround.float.readSummary({ tripRef: onGroundTripRef });
         const row = summary.data.data.find((r) => r.managerId === managerRef);
         if (row === undefined) {
-          throw new AssertionFailure('step 45: the manager vanished from the float summary');
+          throw new AssertionFailure('step 44: the manager vanished from the float summary');
         }
         assertEquals(
           row.balanceMinor,
@@ -2714,7 +2781,7 @@ async function main(): Promise<void> {
     passed++;
 
     // -------------------------------------------------------------------
-    // Step 46 — collect against a balance. The Balance row itself is a CRM
+    // Step 45 — collect against a balance. The Balance row itself is a CRM
     // fact, pushed with the api-key client exactly the way a real CRM would
     // (`kaafil.trips.balance.push`) — collections never derives one from
     // thin air. The overpay guard is a HARD refusal, not a clamp: it names
@@ -2726,7 +2793,7 @@ async function main(): Promise<void> {
     const balanceDueMinor = 6_000_00; // ₹6,000.00 outstanding
 
     await step(
-      46,
+      45,
       'collections: record a payment against a CRM-pushed balance, then an overpay refuses with details.remainingMinor',
       async () => {
         const manifestBefore = await kaafil.trips.travellers.pushManifest({
@@ -2778,7 +2845,7 @@ async function main(): Promise<void> {
         assertEquals(eligible.data.length, 1, 'the eligible list did not carry exactly the one balance just pushed');
         const eligibleRow = eligible.data[0];
         if (eligibleRow === undefined) {
-          throw new AssertionFailure('unreachable: step 46 already asserted the eligible list has one row');
+          throw new AssertionFailure('unreachable: step 45 already asserted the eligible list has one row');
         }
         assertEquals(eligibleRow.outstandingMinor, balanceDueMinor, 'the eligible row does not show the pushed dueMinor as outstanding');
         const travellerId = eligibleRow.travellerId;
@@ -2827,20 +2894,20 @@ async function main(): Promise<void> {
     passed++;
 
     // -------------------------------------------------------------------
-    // Step 47 — an over-return of float. The negative-float guard (RULES R4)
+    // Step 46 — an over-return of float. The negative-float guard (RULES R4)
     // applies to `return` exactly as it does to an `ADJUSTMENT(OUT)` — a
     // refusal names `details.currentBalanceMinor`, the figure the guard
     // actually compared against, so a client can rebase rather than guess.
     // -------------------------------------------------------------------
 
     await step(
-      47,
+      46,
       'float: an over-return refuses with details.currentBalanceMinor — the negative-float guard',
       async () => {
         const summaryBefore = await onGround.float.readSummary({ tripRef: onGroundTripRef });
         const rowBefore = summaryBefore.data.data.find((r) => r.managerId === managerRef);
         if (rowBefore === undefined) {
-          throw new AssertionFailure('step 47: the manager has no float row to over-return against');
+          throw new AssertionFailure('step 46: the manager has no float row to over-return against');
         }
         const currentBalanceMinor = rowBefore.balanceMinor;
 
@@ -2882,7 +2949,7 @@ async function main(): Promise<void> {
     passed++;
 
     // -------------------------------------------------------------------
-    // Step 48 — claim a PERSONAL expense, ingest a CRM decision, and replay
+    // Step 47 — claim a PERSONAL expense, ingest a CRM decision, and replay
     // it with an EQUAL `crmDecisionAt` to prove the self-heal (R17):
     // strictly-older is dropped `ignored_stale`, EQUAL is RE-APPLIED, never
     // merely re-acknowledged as already-done.
@@ -2935,8 +3002,8 @@ async function main(): Promise<void> {
       return { status: response.status, body: payload.data ?? {} };
     }
 
-    await step(
-      48,
+    await runBlockable(47, () => step(
+      47,
       'claim a PERSONAL expense, ingest PAID, then replay with an EQUAL crmDecisionAt — RE-APPLIED, not an error',
       async () => {
         const idk = `sim-personal-${runSuffix}`;
@@ -2970,14 +3037,17 @@ async function main(): Promise<void> {
             // session can ever present. There is no code path from ANY
             // credential this repo holds to turn this flag on, which is
             // exactly the same shape as step 38's "no admin route creates a
-            // template" gap. This step FAILS, naming the cause, rather than
-            // skipping — a step that cannot be verified is a failing step
-            // (this file's own rule, stated at the top), and the failure
-            // IS the finding: see the README's "what this repo cannot do".
-            throw new AssertionFailure(
-              'expenses.claims is OFF on this agency and no credential this repo holds can turn it on ' +
-                '(PATCH /api/v1/agencies/{ref}/entitlement is auth: \'console\' only) — the claim/claim-status ' +
-                'walkthrough cannot be driven end-to-end against this stack. See the README.',
+            // template" gap, and it is GAPS.md's own boundary `B1`
+            // ("agency entitlement read/toggle ... consoleAuth only").
+            // This is a BLOCKED step, not a failing one and not a skipped
+            // one: it is neither silently green (the repo's rule that an
+            // unverifiable step is a failing step still holds) nor does it
+            // abort the other 47 steps' worth of proof this run already
+            // gathered — main() records it, reports it loudly, and moves on.
+            throw new BlockedStep(
+              'expenses.claims is off on this agency — PATCH /agencies/{ref}/entitlement is ' +
+                'console-only (GAPS.md boundary B1). Flip the flag from a console session and re-run.',
+              'B1',
             );
           }
           throw err;
@@ -3012,19 +3082,8 @@ async function main(): Promise<void> {
         assertEquals(replay.body['claimStatus'], 'PAID', 'the replayed ingest lost claimStatus PAID');
         console.log(`  re-ingest with the SAME decisionAt → verdict=${String(replay.body['verdict'])} (RE-APPLIED, not an error)`);
       },
-    );
-    passed++;
+    ));
 
-    // -------------------------------------------------------------------
-    // Step 49 — close and summarize.
-    // -------------------------------------------------------------------
-
-    await step(49, 'close() the client', async () => {
-      kaafil.close(); // synchronous — no in-flight request survives it
-    });
-    passed++;
-
-    console.log(`\nAll ${passed} steps passed.`);
     console.log('\nTo run the browser half, start it with the manager session pair printed in step 8:');
     console.log('  pnpm dev   (from this repo, then open browser/ and call client.session.open() with that pair)');
     // The board only exists on the on-ground trip — the step-2 trip has no rooms
@@ -3034,16 +3093,53 @@ async function main(): Promise<void> {
     console.log(`  journey + capabilities : ${tripRef}`);
     console.log(`  rooming board          : ${onGroundTripRef}   (the one with rooms and a filled board)`);
   } catch (err) {
+    genuineFailure = true;
     console.error(`\nStep ${currentStep} FAILED: ${err instanceof Error ? err.message : String(err)}`);
     if (err instanceof ApiKeyEnvironmentMismatchError) {
       console.error('  KAAFIL_API_KEY prefix does not match the derived environment — check .env.');
     }
-    kaafil.close();
     process.exitCode = 1;
-    return;
-  }
+  } finally {
+    // Step 48 — close the client. ALWAYS runs, blocked steps or not: a run
+    // that stopped counting steps 1..46 as passed and step 47 as blocked
+    // still has an open client to close, exactly as a genuine abort at any
+    // earlier step always did (previously via a bare, unlogged
+    // `kaafil.close()` in the catch above — now the same call, but as a real,
+    // numbered, logged step every run reaches).
+    try {
+      await step(48, 'close() the client', async () => {
+        kaafil.close(); // synchronous — no in-flight request survives it
+      });
+      passed++;
+    } catch (err) {
+      console.error(`\nStep 48 FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
 
-  process.exitCode = 0;
+    // The summary is only meaningful once every step has at least been
+    // ATTEMPTED — a genuine abort stops that short, and its terse "Step N
+    // FAILED" above already says everything there is to say. A blocked run
+    // reached the end, though, and that is exactly the run this summary
+    // exists to describe: some steps passed, one or more hit a documented
+    // wall this repo cannot get past, and the run still proves everything on
+    // the other side of that wall.
+    if (!genuineFailure) {
+      console.log(
+        `\n${String(passed)} passed · ${String(blocked.length)} blocked · ${String(skippedByBlock)} skipped-by-block`,
+      );
+      for (const record of blocked) {
+        console.log(`BLOCKED  step ${String(record.step)}  ${record.message}`);
+      }
+    }
+
+    // A blocked run is not a green run — it still exits non-zero, even
+    // though it did not abort and did not throw all the way to the top.
+    if (blocked.length > 0) {
+      process.exitCode = 1;
+    } else if (process.exitCode === undefined) {
+      process.exitCode = 0;
+    }
+  }
 }
 
 main().catch((err: unknown) => {

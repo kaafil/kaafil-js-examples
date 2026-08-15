@@ -1,6 +1,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 
 // `__dirname` doesn't exist in an ESM config (this package is `"type":
 // "module"`), so the directory is derived from `import.meta.url` instead —
@@ -15,6 +16,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 // no CJS interop, no polyfill, and no bundler special-casing to add here.
 export default defineConfig({
   root,
+  plugins: [react()],
   server: {
     port: 5173,
     strictPort: true,
