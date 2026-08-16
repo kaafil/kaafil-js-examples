@@ -24,6 +24,7 @@ import { shareSpecs } from './specs/share';
 import { entitlementSpecs } from './specs/entitlement';
 import { errorsSpecs } from './specs/errors';
 import { offlineSpecs } from './specs/offline';
+import { closeoutSpecs } from './specs/closeout';
 
 import { guides as buildGuides } from './guides';
 import { TOUR as TOUR_DATA, tourGo, guideVals } from './tour';
@@ -48,7 +49,7 @@ export class PlaygroundLogic extends DCLogic<any, PlaygroundLogicProps> {
 
   // design lines 4-6
   // lane: B = runs on your CRM backend (API key) · D = runs on this device (manager session)
-  // state: sdk = a real kaafil-js method today · raw = engine endpoint, no SDK path yet · plan = not built yet
+  // state: sdk = a real kaafil-js method today · plan = no endpoint yet · console = consoleAuth-only
   ENGINE = 'https://engine.test.kaafil.com';
   BACKEND = 'http://localhost:4000';
 
@@ -147,7 +148,8 @@ export class PlaygroundLogic extends DCLogic<any, PlaygroundLogicProps> {
     ...shareSpecs(this),
     ...entitlementSpecs(this),
     ...errorsSpecs(this),
-    ...offlineSpecs(this)
+    ...offlineSpecs(this),
+    ...closeoutSpecs(this)
   };
 
   // design line 1546 (`guides = {...}`), ported to guides.ts

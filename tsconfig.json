@@ -20,14 +20,14 @@
     "jsx": "react-jsx",
     "types": ["node"]
   },
-  // `on-ground/` is imported by BOTH halves — the Node walkthrough and the
-  // browser page render the same rooming board from the same endpoint — so it
-  // sits beside them rather than inside either, and is type-checked with both.
+  // `on-ground/` is GONE as of kaafil-js@0.1.0-beta.3: the SDK's browser entry
+  // now wires all sixteen on-ground resource groups, so both halves — the Node
+  // walkthrough and the browser page — call `kaafil-js`/`kaafil-js/client`
+  // directly and there is no third, hand-rolled client left to type-check.
   "include": [
     "server/**/*.ts",
     "browser/**/*.ts",
     "browser/**/*.tsx",
-    "on-ground/**/*.ts",
     "backend/**/*.ts"
   ]
 }

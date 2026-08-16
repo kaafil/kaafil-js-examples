@@ -2,8 +2,8 @@
 
 Kaafil is a trip-operations engine: a partner CRM ingests trips and travellers over an API key, a
 manager runs the trip day-to-day from a device, and the two sides meet through `kaafil-js`. This repo
-is two runnable views of that same product — a **browser playground** (73 method screens, one per
-`kaafil-js` capability) and a **Node walkthrough** (`server/simulate.ts`, the same trip lifecycle as 48
+is two runnable views of that same product — a **browser playground** (84 method screens, one per
+`kaafil-js` capability) and a **Node walkthrough** (`server/simulate.ts`, the same trip lifecycle as 57
 asserted steps). Neither mocks the other: both hit the identical vendored contract
 (`kaafil-js/openapi/openapi.json`).
 
@@ -59,8 +59,9 @@ Then flip the sidebar's rail from Simulated to Connected.
 **Why step 3 matters even with a backend in the picture:** the API-key lane (session minting, trips)
 really does proxy through your backend, and only needs *its* CORS setting
 (`PLAYGROUND_ORIGIN`, already defaulted to `:5173`). But the manager-session lane —
-`journey`/`vendors` through `kaafil-js/client`, and every `raw`-badged on-ground operation
-(itinerary, rooming, seating, pickups, treks, checklists, collections, expenses, float, files) —
+every on-ground operation through `kaafil-js/client`
+(itinerary, rooming, seating, pickups, treks, checklists, collections, expenses, float, files,
+closeout, sync) —
 is called **directly from this browser tab to the engine**, on purpose: that's the real shape of a
 manager's device in production, and the playground doesn't interpose a proxy a real deployment
 wouldn't have. Miss the engine's CORS setting and that whole half of the playground dies at preflight.
@@ -105,7 +106,7 @@ a pattern to copy into a real integration.** A production backend calls `kaafil.
 directly from its own business logic, with its own validation on the way in — not through one generic
 reflective RPC surface. See [`backend/README.md`](./backend/README.md) for the full reasoning.
 
-## The Node walkthrough — `pnpm simulate`, 48 steps
+## The Node walkthrough — `pnpm simulate`, 57 steps
 
 ```bash
 cp .env.example .env
@@ -130,18 +131,22 @@ blocked run still exits non-zero: it is not the same thing as a clean one.
 | block | steps | credential | what it's proving |
 |---|---|---|---|
 | CRM setup | 1–11 | the partner API key | ingest, manifest, manager assignment, the async journey build, capabilities, the four typed-error lessons |
-| Manager's day | 12–22 | a manager session (step 8 mints it) | itinerary + rooming, on `on-ground/` for the writes |
+| Manager's day | 12–22 | a manager session (step 8 mints it) | itinerary + rooming |
 | Boarding day | 23–32 | manager session | seating, pickup points, a trek postpone |
 | Checklist | 33–40 | manager session, reads back on the API key at step 40 | the trip checklist |
-| Money wave | 41–48 | manager session, one API-key call at step 47 | float, expenses, files, collections |
+| Money wave | 41–47 | manager session, one API-key call at step 47 | float, expenses, files, collections |
+| Closing day | 48–53 | manager session | close-out blockers, the version-guarded handover, the lock, the `423` it causes, the PDF pack |
+| Offline drain | 54–56 | manager session | six writes queued against a genuinely unreachable host, restored, drained as ONE batched push, then read back from the server |
+| Teardown | 57 | — | `close()`, and it always runs |
 
-`kaafil-js` only has resource groups for `auth`/`trips`/`journey`/`vendors`/`webhooks`/`events`/`share
-tokens`/`itinerary`/`rooming`/`checklists` today, and of those, only `itinerary`/`rooming`/`checklists`
-carry any *write* — every one of those writes is `managerAuth`-only, which `KaafilClient` (the browser
-entry) doesn't expose. So steps that write on-ground data go through `on-ground/client.ts`, a
-deliberately small hand-rolled HTTP client — one error class, no retry ladder, no token rotation — that
-gets **deleted, not migrated**, the day the SDK grows the entry points to replace it (see
-[What this repo deliberately does not do](#what-this-repo-deliberately-does-not-do)).
+Every step in this walkthrough goes through `kaafil-js`. It did not always: until
+`kaafil-js@0.1.0-beta.3`, `KaafilClient` (the browser entry, and the only one that can hold a manager
+session) exposed just `journey` and `vendors`, so all 44 `managerAuth`-only on-ground writes went
+through `on-ground/client.ts` — a deliberately small hand-rolled HTTP client with one error class, no
+retry ladder and no token rotation, documented as something that would be **deleted, not migrated**,
+the day the SDK grew the entry points.
+
+That day came. Sixteen resource groups are wired, and `on-ground/` is gone.
 
 <details>
 <summary><b>Steps 1–11 — the CRM's side</b></summary>
@@ -218,9 +223,10 @@ gets **deleted, not migrated**, the day the SDK grows the entry points to replac
 <details>
 <summary><b>Steps 41–48 — the money wave (float, expenses, files, collections)</b></summary>
 
-`kaafil-js` has no `float`/`expenses`/`collections`/`files` resource group at all, on either client — not
-even read-only — so all four extend `on-ground/client.ts` for every call. The one exception is step
-47's claim-status ingest, which is `apiKeyAuth` and doesn't belong on a manager-session client at all.
+All four groups — `float`, `expenses`, `collections`, `files` — are on `kaafil-js/client` as of
+beta.3 and run on the manager session. The one exception is step 47's claim-status ingest, which is
+`apiKeyAuth` and doesn't belong on a manager-session client at all: a CRM's decision arriving inbound,
+not something the phone gets to assert.
 
 | Step | The claim |
 |---|---|
@@ -277,26 +283,30 @@ retry policy. Step 10 demonstrates four lessons:
 Module-local error codes also exist — `NOT_A_TREK`, `SEATING_CAPACITY_ORPHAN`, `CANNOT_POSTPONE` — real,
 named codes in the same `ErrorCode` enum every cross-cutting code lives in, instead of a shared `422
 BUSINESS_RULE_VIOLATION` plus a `details.rule` string to switch on. Step 32 reads `NOT_A_TREK` off
-`on-ground/`'s error object directly; `checklists`' step 37 draws the line the other way on purpose — a
+the SDK's typed error directly; `checklists`' step 37 draws the line the other way on purpose — a
 `COMPLETE` item's delete refusal stays a shared code, because no FRD names it as an identity a caller
 needs to grep for. The mechanism exists; using it is a judgment call, not a reflex.
 
 ## Reading the badges
 
-Every one of the 73 method screens carries one of four badges — the vocabulary is `GAPS.md`'s §5, not a
-playground invention. This is the fastest week you'll save reading this repo: it tells you, per method,
-whether `kaafil-js` can make the call for you at all.
+Every one of the 84 method screens carries one of three badges — the vocabulary is `GAPS.md`'s §5, not
+a playground invention. This is the fastest week you'll save reading this repo: it tells you, per
+method, whether `kaafil-js` can make the call for you at all.
 
 | badge | what it means | what it means for your integration |
 |---|---|---|
-| **SDK** (27 methods) | a typed `kaafil-js` method exists and a shipped entry point satisfies its auth scheme | call it through the SDK — retries, idempotency, typed errors, all handled |
-| **RAW HTTP** (44 methods) | the engine endpoint is live and real, but no SDK client can reach it — these are `managerAuth`-only writes and `KaafilClient` (the browser entry) wires up only `journey`+`vendors` | it's an **SDK gap, not a product gap**: you'll hand-roll the HTTP call yourself today, the way `on-ground/client.ts` does, until the SDK grows the entry point |
+| **SDK** (83 methods) | a typed `kaafil-js` method exists and a shipped entry point satisfies its auth scheme | call it through the SDK — retries, idempotency, typed errors, all handled |
 | **CONSOLE ONLY** (1 method) | `consoleAuth`-only by deliberate design (`GAPS.md` boundary `B1`/`B3`) — no API key or manager session will *ever* satisfy it | stop trying to reach it from your integration; it's a human-in-the-loop operation in the partner console, permanently |
-| **PLAN** (1 method) | no endpoint exists at all yet | there's genuinely nothing to call — check `GAPS.md` §3 for the phase it lands in |
+| **PLAN** (0 methods) | no endpoint exists at all yet | nothing carries this badge today — check `GAPS.md` §3 for what is still unbuilt |
 
-Only two methods actually render a `StubCard` in the playground: `entitlement.read` (**console** —
-reading an agency's own entitlement flags is console-only) and `offline.outbox` (**plan**, Phase 15 —
-no queue, drain loop, or backoff ladder exists yet). Two more carry a real caveat worth knowing before
+**There used to be a fourth badge, RAW HTTP, on 44 of these methods**, meaning "the endpoint is live
+and real, but no SDK client can reach it". It was accurate and it mattered — an SDK gap is not a
+product gap. `kaafil-js@0.1.0-beta.3` closed it: those 44 methods are now **SDK**, and the badge has
+been removed from the code rather than left in the legend.
+
+Exactly one method now renders a `StubCard`: `entitlement.read` (**console** — reading an agency's own
+entitlement flags is console-only). `offline.outbox` was the second until beta.3 and now drives the
+SDK's real outbox. Two more carry a caveat worth knowing before
 you run them, even though they're tagged runnable: `checklists.pull` runs for real but has nothing to
 pull (no route anywhere creates an agency template, so the `404` it returns is itself the honest,
 live result), and `webhooks.burst` needs a webhook endpoint already registered — the same console-only
@@ -311,19 +321,21 @@ deliberate boundaries (§2), and the register of what's scheduled vs. unschedule
 | `journey.get` (or a `waitUntilReady` timeout) keeps answering `404`/timing out on a trip you just ingested | the journey build is asynchronous and its background worker isn't running, or is backlogged, against this engine | confirm the worker process is up and its queue is draining before assuming the SDK or this repo is broken |
 | A `401` the instant the browser makes its first call | the minted manager pair expired before the tab opened — access tokens live **minutes** | mint a fresh session; rotation only helps a pair that was alive when it opened |
 | `expenses.claims` replay (walkthrough step 47) always answers with the flag off | this repo's seed agency ships with `expenses.claims` disabled, and only a `consoleAuth`-only route can flip it | flip it from a console session against your own agency, or accept the `BLOCKED` line as correct |
-| `UnsatisfiableSchemeError` before any request | a `managerAuth`-only operation was called on the API-key client | that call belongs on the manager-session lane — today, `raw` via `on-ground/` |
+| `UnsatisfiableSchemeError` before any request | the operation's scheme does not accept this client's credential — a `managerAuth`-only write on the API-key client, or `closeout.unlock`/`expenses.claims.ingest` (both `apiKeyAuth`-only) on the manager client | move the call to the other lane. Every `managerAuth` on-ground operation is on `kaafil-js/client` since beta.3; the ones that are not are `apiKeyAuth` **by design**, not by omission |
 | `409 CONFLICT_VERSION` on a checklist toggle | a stale `expectedStatus` was sent | read `details.currentStatus` and retry with it |
 | `422` on `sortOrder` | a client sent its own ordering integer | drop it — the server owns `sortOrder` |
 | A delta looks complete but rows go missing over days | the cursor came from your machine's clock, not `meta.serverTime` | hand the server's own timestamp back, apply by id |
 | The engine refuses your key outright, before any network call | a `kf_live_` key against `environment: 'test'` | test-plane keys only — that guard is in the SDK |
+| Every step from 2 onward fails `UNAUTHENTICATED`, and the client looks broken | you pointed `KAAFIL_BASE_URL` at a different engine than the one your `KAAFIL_API_KEY` was minted on — most often a local compose stack, whose database has no such key row | the key does not travel with the base URL. Provision one on the engine you are actually calling (a `consoleAuth` operation, so a deliberate setup step), or drop the override |
 
 ## What this repo deliberately does not do
 
-- **The `raw` writes do not go through `kaafil-js`, because no SDK client can make one.** `KaafilClient`
-  exposes exactly `journey` and `vendors`; every other `managerAuth`-only operation goes through
-  `on-ground/client.ts` — one error class, no retry ladder, no token rotation, response shapes restated
-  by hand instead of derived from the contract. It is deleted, not migrated, the day the SDK grows a
-  client path for them. Read it as a measurement of what the SDK gives you, not a pattern to copy.
+- **Almost no hand-rolled HTTP.** The one exception, `server/support/raw.ts`, is four lines and exists
+  for a single structural reason: two walkthrough steps assert that the engine refuses a body the
+  generated types make *untypeable* (a client-supplied `sortOrder`; a `status: 'LIVE'`). A typed client
+  cannot send an untypeable body, so proving the server also refuses it needs something below the type
+  layer. It is **not** a fallback for an unreachable operation — there are none left on the manager
+  lane. If you find yourself wanting a second use, that is a finding for `GAPS.md`.
 - **No partner-console flow.** Minting keys, registering webhook endpoints, and toggling entitlement
   flags are Kaafil's own control-plane operations, `consoleAuth`-only, permanently. This repo receives
   `KAAFIL_API_KEY` from the environment, the way a real integrator does after collecting one outside
@@ -341,8 +353,10 @@ deliberate boundaries (§2), and the register of what's scheduled vs. unschedule
   and row counts only go up.
 - **`errors.table` (Simulated mode) renders a hand-picked 16-row subset**, not the SDK's full generated
   catalog — Connected mode swaps in the real `ERROR_CODE_TABLE` for exactly this reason.
-- **`423 LOCKED`** is published in the contract on every on-ground write but produced by none of them —
-  the close-out lock is a pass-through everywhere in this repo; there's nothing live to provoke it against.
+- **`423 LOCKED` is now produced, not just published.** The close-out lock shipped in Phase 14, and
+  walkthrough step 52 provokes a real `423` from an ordinary checklist write on a locked trip — with the
+  control (the same write, before the lock) in the same step, so the assertion is about the lock rather
+  than about that write happening to fail.
 - A long tail of narrower gaps — manual bed swaps, stay-window CRUD, seat swaps, pickup-stop reopen,
   walk-ins, `voidCollection`, `readFileUrl`, and more — are named individually in `GAPS.md` rather than
   duplicated here. That file is the audit; this README is the tour.
@@ -352,18 +366,18 @@ deliberate boundaries (§2), and the register of what's scheduled vs. unschedule
 ```
 browser/                the playground app
   src/logic/             core.ts + nav/methods/titles/guides/tour/viewmodel, sim/ (fixtures), specs/
-                          (73 method specs, one run()+live() pair each), live/ (transport.ts, lane.ts)
+                          (84 method specs, one run()+live() pair each), live/ (transport.ts, lane.ts,
+                          offline.ts — the IndexedDB-backed offline engine, one per manager session)
   src/ui/                 Sidebar, Lanes, Header, Tabs, MethodScreen, Params, ResponsePanel, LogRail,
                           StubCard, views/ (one renderer per module's response shape)
   src/dc/                 s() style helper, Hov, DCLogic, useLogic, highlight.ts (Shiki), tests
   .design/                the decoded design source — reference only, gitignored
 
-server/simulate.ts       the 48-step Node walkthrough
+server/simulate.ts       the 57-step Node walkthrough
+server/support/          chip.ts (occupant glyph/tone), upload.ts (presigned PUT via node:http),
+                          raw.ts (the ONE raw probe — see "What this repo deliberately does not do")
 
 backend/                 the CRM stand-in: server.ts (the four routes + /health + /entitlement + /sdk), README.md
-
-on-ground/               the temporary raw-HTTP client for every managerAuth-only ('raw') operation —
-                          client.ts, types.ts, chip.ts (occupant glyph/tone), upload.ts (presigned PUT)
 
 scripts/                 extract-design.mjs
 

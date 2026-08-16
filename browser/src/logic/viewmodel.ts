@@ -32,22 +32,19 @@ import type { StubTone } from '../ui/StubCard';
 // convention someone has to remember to keep true.
 
 /** Narrative content for the two-tone StubCard, keyed by `mod.act`. Only
- * methods.ts's `'plan'`/`'console'` states ever need an entry — today that
- * is exactly `entitlement.read` (console) and `offline.outbox` (plan, phase
- * 15); see GAPS.md §5 for the audit these two lines summarise. A method that
- * gains this state later without an entry here still renders honestly (the
- * fallback below), it just won't have this file's hand-written detail. */
+ * methods.ts's `'plan'`/`'console'` states ever need an entry — today that is
+ * exactly `entitlement.read` (console). `offline.outbox` used to be the second
+ * entry here (plan, phase 15); the offline layer shipped in
+ * `kaafil-js@0.1.0-beta.3` and it now has a real `live()`, so its stub copy was
+ * DELETED rather than left to read as current. A method that gains a stub state
+ * later without an entry here still renders honestly (the fallback below), it
+ * just won't have this file's hand-written detail. */
 const STUB_INFO: Record<string, { missing: string; why: string; phase?: number; consoleOp?: string }> = {
   'entitlement.read': {
     missing: 'No API key and no manager session can ever call readAgencyEntitlement — its scheme is consoleAuth alone.',
     why: 'boundary B1: entitlement is a console-managed setting your CRM configures once per agency, not something a partner credential reads or writes.',
     consoleOp: 'An agency admin opens this agency’s entitlement panel in the Kaafil console to read or toggle a flag.'
   },
-  'offline.outbox': {
-    missing: 'No write-ahead queue exists anywhere in kaafil-js or on-ground/client.ts to send a queued write to.',
-    why: 'Phase 15 (batched sync) has not been built yet. The seams are already shipping — a storage-adapter interface, failure classification, the retryability table — but the queue itself, its drain loop, and its backoff ladder are still ahead.',
-    phase: 15
-  }
 };
 
 function stubFor(mod: string, act: any): { state: StubTone; missing: string; why: string; phase?: number; consoleOp?: string } {
@@ -433,9 +430,16 @@ function viewValsBody(this: any, v: any, d: any, ref: any, badge: any, out: any)
       fg: r.outboxClass === 'TRANSIENT' ? '#b45309' : r.outboxClass === 'CONFLICT' ? '#6852d6' : '#6f6f6f'
     }));
   } else if (v === 'outbox' && d) {
-    out.viewOut = true; out.viewTitle = 'Outbox · your code, not the SDK’s';
-    out.viewSub = d.online ? 'drained ' + d.drained + ' job(s) FIFO on reconnect' : d.queued + ' job(s) queued while offline';
-    out.outRows = this.sim.outbox.map((j: any) => ({ id: j.id, op: j.op, key: j.key, state: j.state }));
+    out.viewOut = true; out.viewTitle = 'Outbox · the SDK’s, since beta.3';
+    out.viewSub = d.online
+      ? 'applied ' + (d.applied ?? d.drained ?? 0) + ' · parked ' + (d.parked ?? 0) + ' · remaining ' + (d.remaining ?? 0) + (d.usedBatchTransport ? ' · batched' : '')
+      : (d.queued ?? 0) + ' job(s) queued while offline';
+    // `d.rows` is the LIVE engine's own `outbox.all()`, mapped in
+    // `../specs/offline.ts`. The simulator's `sim.outbox` is the fallback and
+    // is only correct in Simulated mode — reading it in Connected mode would
+    // paint an empty (or a stale simulated) queue over a real, non-empty one,
+    // which is the precise failure this branch used to have.
+    out.outRows = (d.rows ?? this.sim.outbox).map((j: any) => ({ id: j.id, op: j.op, key: j.key, state: j.state }));
     if (!out.outRows.length) out.outRows = [{ id: '—', op: 'queue empty', key: '', state: d.online ? 'DRAINED' : 'EMPTY' }];
   } else if (v === 'seat' && d) {
     out.viewSeat = true; out.viewTitle = 'Fleet';
@@ -627,7 +631,10 @@ export function renderVals(this: any): any {
   const act = this.activeMethod();
   const activeId = act ? act[0] : null;
   const lane = act ? act[2] : null;
-  const tagStyle: any = { sdk: ['#e8f7ef', '#197d4b', 'SDK'], raw: ['#fef4e3', '#b45309', 'RAW HTTP'], plan: ['#f2f1ef', '#6f6f6f', 'PLANNED'], console: ['#fef3f2', '#b3312f', 'CONSOLE ONLY'] };
+  // The 'raw' / 'RAW HTTP' tone was removed with `on-ground/` in beta.3 — see
+  // `./methods.ts`'s header. A style left here for a badge no method carries is
+  // read as a badge some method still carries.
+  const tagStyle: any = { sdk: ['#e8f7ef', '#197d4b', 'SDK'], plan: ['#f2f1ef', '#6f6f6f', 'PLANNED'], console: ['#fef3f2', '#b3312f', 'CONSOLE ONLY'] };
   const dim = { bd: '#eae8e6', bg: '#fff', sh: 'none', dot: '#c9c7c3', fg: '#6f6f6f' };
   const lit = { bd: '#6852d6', bg: '#fff', sh: '0 0 0 3px rgba(104,82,214,.14)', dot: '#6852d6', fg: '#191919' };
   const laneNote = lane === 'B'

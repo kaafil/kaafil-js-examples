@@ -46,7 +46,6 @@
  */
 
 import { KaafilClient } from 'kaafil-js/client';
-import { createOnGroundClient, type OnGroundClient } from '../../../../on-ground/client';
 
 // ---------------------------------------------------------------------------
 // The error shape
@@ -308,7 +307,6 @@ function loadPersistedSession(): LiveSession | null {
 }
 
 let _session: LiveSession | null = loadPersistedSession();
-let _managerClient: OnGroundClient | null = null;
 let _sdkClient: KaafilClient | null = null;
 
 function sessionRequiredError(action: string): TransportError {
@@ -328,7 +326,7 @@ function sessionRequiredError(action: string): TransportError {
 /** POSTs `{managerRef, ttlSeconds?}` to `${backendUrl()}/session`
  * (`kaafil.auth.mintManagerToken` under the hood — see `backend/README.md`),
  * stores the resulting token pair + resolved engine `baseUrl`, and persists
- * it to `sessionStorage`. Invalidates any previously built `managerClient`/
+ * it to `sessionStorage`. Invalidates any previously built
  * `sdkClient` so the next call to either rebuilds against the new session.
  *
  * The resolved promise also carries `meta` — `backend/server.ts`'s
@@ -368,7 +366,6 @@ export async function mintSession(input: MintSessionInput): Promise<LiveSession 
     baseUrl: payload.baseUrl,
   };
   _session = session;
-  _managerClient = null;
   _sdkClient = null;
   persistSession(session);
   return { ...session, meta: payload.meta ?? null };
@@ -379,7 +376,6 @@ export async function mintSession(input: MintSessionInput): Promise<LiveSession 
  * operation in the vendored spec; this is purely local teardown. */
 export function closeSession(): void {
   _session = null;
-  _managerClient = null;
   if (_sdkClient) {
     try {
       _sdkClient.close();
@@ -408,25 +404,35 @@ export function engineUrl(): string {
 }
 
 // ---------------------------------------------------------------------------
-// managerClient — the on-ground manager-session client, lazily built
+// managerClient — the manager-lane client. Now the SDK's own browser entry.
 // ---------------------------------------------------------------------------
 
-/** A lazily-built `on-ground/client.ts` client bound to the open session's
- * engine base URL and current access token — the manager-lane writes no
- * `kaafil-js` credential can reach yet (GAPS.md §5's `'raw'` state: 46
- * operations, `managerAuth`-only). Throws `SessionRequiredError` if no
- * session is open; that is a legitimate, typed-shaped answer, not a silent
- * failure. Rebuilt (once) after every `mintSession`/token rotation — see
- * `mintSession`'s invalidation and this module's `_managerClient` reset. */
-export function managerClient(): OnGroundClient {
-  if (!_session) throw sessionRequiredError('An on-ground manager-lane call');
-  if (!_managerClient) {
-    _managerClient = createOnGroundClient({
-      baseUrl: _session.baseUrl,
-      accessToken: _session.accessToken,
-    });
-  }
-  return _managerClient;
+/**
+ * The manager-lane client for every on-ground read and write.
+ *
+ * Until `kaafil-js@0.1.0-beta.3` this returned a hand-rolled raw-HTTP client
+ * (`on-ground/client.ts`) because `KaafilClient` wired only `vendors` and
+ * `journey`, and every on-ground operation is `managerAuth`-only. That gap is
+ * closed: the browser entry now exposes sixteen resource groups — `itinerary`,
+ * `rooming`, `seating`, `pickups`, `treks`, `checklists`, `float`, `expenses`,
+ * `collections`, `files`, `closeout`, `sync`, plus the pre-existing `vendors`,
+ * `journey`, `notifications` and `share`. `on-ground/` has been deleted, and
+ * this function is now an alias for `sdkClient()` so that every `live()` in
+ * `../specs/` runs on the SDK's retry ladder, typed error hierarchy, automatic
+ * idempotency keys and automatic `401`→refresh rotation instead of re-
+ * implementing all four by hand.
+ *
+ * Kept as a distinct name rather than folded into `sdkClient()` at the call
+ * sites because the DISTINCTION it drew is still real and still worth reading:
+ * these are the manager's own credential on the manager's own device, not the
+ * API-key lane proxied through `backend/server.ts`. What changed is which
+ * client can carry it — not who is calling.
+ *
+ * Throws `SessionRequiredError` if no session is open.
+ */
+export function managerClient(): KaafilClient {
+  if (!_session) throw sessionRequiredError('A manager-lane call');
+  return sdkClient();
 }
 
 // ---------------------------------------------------------------------------

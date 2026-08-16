@@ -8,11 +8,11 @@ integrator; **this file explains the constraints to whoever edits it.** Where th
 
 ## 1. What this repo is
 
-Two views of one product, driven by the same **73 method specs**:
+Two views of one product, driven by the same **84 method specs**:
 
 - **`browser/`** — a React playground, one screen per module `kaafil-js` can reach, with a **Simulated**
   mode (no engine, no key, no network) and a **Connected** mode (real HTTP against a real engine).
-- **`server/simulate.ts`** — a Node walkthrough of the trip lifecycle as **48 asserted steps** with an
+- **`server/simulate.ts`** — a Node walkthrough of the trip lifecycle as **57 asserted steps** with an
   exit code.
 
 Neither mocks the other. Connected mode and the Node script hit the identical endpoints described by the
@@ -33,8 +33,11 @@ browser/src/logic/       method specs, nav, viewmodel, guides, tour
 browser/src/logic/sim/   the in-memory fixtures that make Simulated mode work with nothing running
 browser/src/dc/          the only code with unit tests (`pnpm test` runs `browser/src/dc/*.test.ts`)
 browser/.design/         extracted design system (fonts, global.css, template). Generated — see §7.
-on-ground/client.ts      the raw-HTTP stopgap for managerAuth-only operations the SDK cannot reach
-server/simulate.ts       the 48-step asserted walkthrough
+browser/src/logic/live/  the Connected-mode transport, the shared live() plumbing, the offline engine
+server/simulate.ts       the 57-step asserted walkthrough
+server/support/          three Node-only helpers simulate.ts needs and the SDK does not carry:
+                         chip.ts (occupant chip from the engine's own glyph+tone), upload.ts (a
+                         docker-compose Host-header workaround, not a contract fact), raw.ts (see R4)
 GAPS.md                  the gap register — see §6, it has an upkeep obligation
 ```
 
@@ -53,16 +56,35 @@ accept it from a query string. If a screen needs API-key work, it goes through a
 backed by `browser/src/logic/sim/`. If a change makes any Simulated screen require a network call, the
 change is wrong. This is the repo's best feature and the first thing a new reader touches.
 
-**R4 — the three badges mean exactly three things, and `raw` is not `broken`:**
+**R4 — the badges mean exactly three things, and there are three of them, not four:**
 
 | badge | meaning | runs for real in Connected mode? |
 |---|---|---|
 | `sdk` | a typed `kaafil-js` method exists **and** a shipped entry point satisfies its scheme | yes, via the SDK |
-| `raw` | the endpoint is live, but no SDK client can reach it (`managerAuth`-only writes) | **yes, via `on-ground/`** — an SDK gap, not a product gap |
-| `plan` | there is no endpoint at all, or it is `consoleAuth`-only and always will be | no — this is the stub set |
+| `plan` | there is no endpoint at all, or it is not built yet | no — this would be the stub set |
+| `console` | the operation is `consoleAuth`-only by deliberate design (`B1`/`B3`) | no, and never — a boundary, not a "coming soon" |
 
-Collapsing "no SDK path" into "no path" is a mistake this repo has already made once and corrected in
-writing (`README.md`, "Corrected after synthesis"). Do not re-make it.
+**As of 2026-08-16: 84 methods. 83 `sdk`, 1 `console` (`entitlement.read`), 0 `plan`.**
+
+**The fourth badge, `raw`, is GONE — and understanding why is the point of this rule.** `raw` meant
+"the endpoint is live, but no SDK client can reach it (`managerAuth`-only writes) — live via
+`on-ground/`, with a manager bearer". It existed because collapsing "no SDK path" into "no path" is a
+mistake this repo made once and corrected in writing. That correction was right, and 44 methods
+carried `raw` honestly for months.
+
+`kaafil-js@0.1.0-beta.3` wired all sixteen resource groups into the browser entry (76 operations from
+one manager session). Those 44 methods are now `sdk`, `on-ground/` is **deleted**, and the badge was
+removed from `browser/src/logic/methods.ts` AND from the tone table in
+`browser/src/logic/viewmodel.ts`. **Do not re-add it, and do not leave a dead tone in a legend** — a
+badge that no method carries reads to a newcomer as one that some method does.
+
+The corollary is the rule that replaces it: **if you find yourself wanting to hand-roll an HTTP call
+for an operation the SDK should reach, that is a FINDING, not a licence.** File it in `GAPS.md`. The
+one surviving raw request in this repo, `server/support/raw.ts`, is not a counter-example: it exists
+solely to send two bodies the generated types make *untypeable* (a client-supplied `sortOrder`, a
+`status: 'LIVE'`) so that two steps can prove the SERVER refuses them. A typed client structurally
+cannot do that, which is why it is the only exception — read that file's header before adding a third
+use.
 
 **R5 — errors are re-serialised faithfully**, never swallowed or reshaped:
 `{ error: { name, code, status, message, details, fields, retryable } }`. A Connected-mode failure and a
@@ -75,22 +97,28 @@ consequence is that the engine's `CORS_ORIGIN` must allowlist `http://localhost:
 there is indistinguishable from the network being down — if the manager half of the playground dies at
 preflight, check `CORS_ORIGIN` before anything else.
 
-**R7 — `kaafil-js` resolves as a pinned exact version (`"0.1.0-beta.2"`) from the real npm registry**,
+**R7 — `kaafil-js` resolves as a pinned exact version (`"0.1.0-beta.3"`) from the real npm registry**,
 not a range. `pnpm install` alone is the whole setup — no sibling checkout, no `npm link`, no vendored
 copy. Pin exact through the beta series (a floating `^0.1.0-beta.x` range is how this repo would silently
 break on a beta bump); only move to a caret range once `kaafil-js` cuts an actual stable (non-`-beta`)
 release. Note npm's dist-tag wrinkle, still live: the package's first-ever publish (`0.1.0-beta.0`)
 permanently claimed `latest` (npm always does this on a first publish, regardless of `--tag`), and every
-publish since has moved only `beta` forward — `beta` now points at `0.1.0-beta.2`, but `latest` is still
+publish since has moved only `beta` forward — `beta` now points at `0.1.0-beta.3`, but `latest` is still
 stuck on the older `0.1.0-beta.0`. An unqualified `npm install kaafil-js` therefore installs the **older**
 version, with the base-URL default bug this repo's own base URL now avoids by pinning exact. This only
 resolves once an actual stable version publishes and moves `latest` forward.
 
-**As of 2026-08-15 the local `kaafil-js` source is again slightly AHEAD of published `beta.2`** — by
-type-only additions: `423 LOCKED` is now declared on the four `forms` write operations (two manager, two
-share) after the close-out lock landed on them (`D-176`). Nothing runtime changed — the SDK already
-classifies `423` as fatal/park repo-wide, independently of any per-operation declaration — so this repo
-needs no republish to work. Fold it into the next beta rather than cutting one for it.
+**As of 2026-08-16 the published `beta.3` and the local `kaafil-js` source are in sync.** `beta.3`
+carries the offline layer (Phase 15), close-out (Phase 14) and the widened browser entry — sixteen
+resource groups, 76 operations, 90 leaf methods — and this repo depends on all three.
+
+**One live contract defect to know before touching the share lane:** `POST /api/v1/sync/push/share`
+declares NO security scheme (`OPERATION_SECURITY.syncPushShare` is `[]`), which the credential
+resolver correctly reads as *public — send no header*. `sync.pushShare` therefore refuses locally by
+name (`KaafilShareBatchUnauthenticatedError`) rather than pushing a traveller's queued form
+submissions unauthenticated, and the offline transport keeps the share lane on the single-op
+`shareSaveForm`/`shareSubmitForm` routes. **Do not "fix" this by attaching a header behind the
+resolver's back.** The fix is engine-side; see `GAPS.md`'s `sync-push-share-unauthenticated`.
 
 **R8 — `packageManager` and `.nvmrc` are pinned** (pnpm, Node 20.11.1; `engines` requires >=20.11). Do not
 bump either as a side effect of another change.
@@ -108,8 +136,16 @@ pnpm build         # tsc --noEmit && vite build browser
 The walkthrough is the fourth gate and needs a live engine:
 
 ```bash
-pnpm simulate      # 48 asserted steps, exit code is the result
+pnpm simulate      # 57 asserted steps, exit code is the result
 ```
+
+**`simulate` needs a credential that exists on the engine it is pointed at, and that is not automatic.**
+`.env`'s `KAAFIL_API_KEY` is provisioned for the host `kaafil-js` defaults to
+(`https://engine.kaafil.in`). Pointing the run at a local compose stack with
+`KAAFIL_BASE_URL=http://localhost:3000` does NOT carry the key with it — the local database has no such
+row, and every step from 2 onward fails `UNAUTHENTICATED`. That reads exactly like a broken client and
+is not one. Minting a local key is a `consoleAuth` operation (boundary `B1`), so it is a deliberate
+setup step, not something a run can do for itself.
 
 **A failing `simulate` step is a finding.** Before reporting it as an engine defect, check the harness —
 this project's own history has several cases where a wrong stamp, a missing host rewrite, or a stale
@@ -132,6 +168,11 @@ missing is worse than no register, because it is read as current. Each row carri
 when that phase ships, re-verify the row against the **newly vendored** spec and either delete it or
 rewrite it with what actually remains.
 
+The obligation runs the other way too: **re-verify the rows you are NOT closing.** A row that says
+"unchanged" is a claim, and it needs the same evidence as a closure. The 2026-08-16 pass marks each
+surviving row with the spec version it was re-checked against, so the next reader can tell a re-verified
+row from one that was merely left alone.
+
 Keep §2's **boundaries** separate from §3's **gaps**. A boundary is a designed refusal (`consoleAuth`-only
 administration, no `POST /agencies`, reviews/tickets deferred by `D-025`); filing it as a gap invites
 someone to "fix" a deliberate decision.
@@ -148,5 +189,8 @@ not the output. Hand-edits there are lost on the next run.
   drift**, and it has been two waves stale before. Re-vendor before assuming an operation is missing.
 - **`shareAuth` was accepted by zero operations** when `GAPS.md` was written. That is no longer true — the
   traveller share fetch surface and the forms write-back both shipped. Re-check before repeating it.
+- **The vendored spec is at 223 operations** as of 2026-08-16 (was 214, and 162 when `GAPS.md` was first
+  written). Two of the three largest rows in that register closed between those numbers. Any sentence
+  you find here or in `README.md` that counts operations is a snapshot — verify it, do not repeat it.
 - The engine's background **worker must be running** for Connected mode: `trips.upsert` and manager
   assignment enqueue a journey build, and `journey.get` answers `404` until a worker lands it.

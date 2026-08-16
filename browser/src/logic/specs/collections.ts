@@ -2,7 +2,7 @@
 // Mechanical port: `this.` -> `c.`. No behavioural changes.
 //
 // `live(p)` added per GAPS.md §5: `list`/`eligible` are `sdk` (apiKey-
-// reachable); `record`/`void` are `raw` (`managerAuth`-only). Two real-shape
+// reachable); `record`/`void` are `managerAuth`-only, now wired on `client.collections`. Two real-shape
 // facts drive the reshaping below (see `kaafil-js/src/resources/
 // collections.ts` and its `openapi.json` schemas):
 //   - the real `CollectionResponse`/`EligibleRowResponse` carry NO
@@ -108,7 +108,7 @@ export const record = (c: any) => ({
     m.collections.unshift(row);
     return c.ok({ ...row, outstandingAfterMinor: bal.dueMinor - bal.collectedMinor });
   },
-  // raw lane: `recordCollection` is managerAuth-only.
+  // sdk lane: `recordCollection` is managerAuth-only.
   live: async (p: any) => {
     try {
       return await managerClient().collections.record({
@@ -135,7 +135,7 @@ export const voidCollection = (c: any) => ({
     if (bal) bal.collectedMinor -= row.amountMinor;
     return c.ok({ id: row.id, status: 'VOIDED', reason: p.reason, version: row.version, outstandingRestoredMinor: row.amountMinor });
   },
-  // raw lane: `voidCollection` is managerAuth-only and needs the row's real
+  // sdk lane: `voidCollection` is managerAuth-only and needs the row's real
   // `version` for `If-Match` — the UI's param bag carries only
   // `collectionId`, so this reads the live list first to find it (a second
   // real call, not a fabricated field).
@@ -145,7 +145,7 @@ export const voidCollection = (c: any) => ({
       const rows: any = await client.collections.list({ tripRef: p.tripRef });
       const found = (rows.data || []).find((r: any) => r.id === p.collectionId);
       if (!found) return { err: { name: 'KaafilNotFoundError', code: 'RESOURCE_NOT_FOUND', status: 404, message: 'No collection with that id on the live trip.', details: null, retryable: 'no' } };
-      return await client.collections.void({ tripRef: p.tripRef, id: p.collectionId, ifMatch: found.version, reason: p.reason });
+      return await client.collections.void({ tripRef: p.tripRef, collectionId: p.collectionId, version: found.version, reason: p.reason });
     } catch (e) { return toFail(e); }
   }
 });

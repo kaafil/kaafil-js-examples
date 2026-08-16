@@ -4,11 +4,11 @@
 // `live(p)` additions (this job): `events`/`deliv`/`redeliver` are lane B
 // (apiKeyAuth) -> `sdkCall()`. `burst` is lane D — genuinely coalesced
 // engine-side writes over a manager session -> `managerClient()`
-// (`on-ground/client.ts`), same 'raw' state as the rest of `itinerary.*`.
+// (`kaafil-js/client`), same 'sdk' state as the rest of `itinerary.*`.
 // See `../live/lane.ts` and `GAPS.md §5`.
-import { isTombstone } from '../../../../on-ground/types';
+import { isTombstone } from 'kaafil-js/client';
 import { managerClient, sdkCall } from '../live/transport';
-import { okLive, toFail } from '../live/lane';
+import { okLive, toFail, unwrapSdk } from '../live/lane';
 
 export const events = (c: any) => ({
   lane: 'B', view: 'events',
@@ -59,7 +59,7 @@ export const burst = (c: any) => ({
     }
     return c.ok({ writes: n, eventsBefore: before, eventsAfter: c.sim.events.length, newEvents: c.sim.events.length - before, editsFolded: c.sim.events[0] ? c.sim.events[0].coalesced : 0 });
   },
-  // Real writes through the manager session (`on-ground/client.ts`'s
+  // Real writes through the manager session (`kaafil-js/client`'s
   // `itinerary.patchItem`) — `editsFolded` (this sim's own per-event fold
   // counter) has no equivalent on the real `EventEnvelopeResponse`, so it is
   // reported `null` rather than invented; the coalescing itself is still
@@ -69,28 +69,28 @@ export const burst = (c: any) => ({
   // COUNTING via `webhooks.deliveries`, not to the event log itself).
   live: async (p: any) => {
     try {
-      const read = await managerClient().itinerary.read({ tripRef: p.tripRef });
-      const item = read.data.items.find((row) => !isTombstone(row));
+      const { data: read } = unwrapSdk(await managerClient().itinerary.read({ tripRef: p.tripRef }));
+      const item = read.items.find((row: any) => !isTombstone(row));
       if (!item) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No itinerary items exist yet for this trip to burst-edit — add one first (itinerary.add).');
       const n = Math.max(1, Math.min(9, Number(p.edits)));
       const before = (await sdkCall(['events', 'listPage'], { type: 'itinerary.updated', limit: 50 })) as unknown[];
-      let ifMatch = item.version;
+      let version = item.version;
       // The two counting reads above/below are bare arrays whose real
       // `meta` never survives the backend's `JSON.stringify` (see
       // `../live/lane.ts`'s `okLive`) — so the last real WRITE's own meta
-      // (this loop's final `itinerary.patchItem`, an on-ground call whose
+      // (this loop's final `itinerary.items.patch`, an SDK call whose
       // `{data, meta}` genuinely does survive the wire) is the one honest
       // meta this composed call has to show.
       let lastMeta: unknown = null;
       for (let i = 0; i < n; i++) {
-        const patched = await managerClient().itinerary.patchItem({
+        const patched = unwrapSdk(await managerClient().itinerary.items.patch({
           tripRef: p.tripRef,
           itemId: item.id,
-          ifMatch,
-          patch: { description: 'burst edit ' + (i + 1) + ' @ ' + Date.now() },
-        });
+          version,
+          description: 'burst edit ' + (i + 1) + ' @ ' + Date.now(),
+        }));
         const row = patched.data as { version?: number };
-        ifMatch = row.version ?? ifMatch + 1;
+        version = row.version ?? version + 1;
         lastMeta = patched.meta;
       }
       const after = (await sdkCall(['events', 'listPage'], { type: 'itinerary.updated', limit: 50 })) as unknown[];

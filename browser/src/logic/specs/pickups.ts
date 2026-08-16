@@ -2,14 +2,19 @@
 // originally `export default`; only the export form changed, no run() body touched.
 //
 // LIVE WIRING (this pass): pickups has no SDK resource group at all
-// (GAPS.md §5 / `on-ground/types.ts`'s header) — every operation is a
-// manager-session write path only `on-ground/client.ts` reaches. Every
+// — every operation is a manager-session write path the SDK's browser entry
+// now wires directly (`client.pickups`). Every
 // `live()` below goes through `managerClient()`. The real routes all nest
-// under `/api/v1/trips/{tripRef}/pickups/...` (`on-ground/client.ts`'s
+// under `/api/v1/trips/{tripRef}/pickups/...` (the real engine routes,
 // `pickupsPath`), never the flat `/api/v1/pickup-points/...` the simulated
 // preview used to show — `req()` below is corrected for every method.
+//
+// LIVE WIRING (kaafil-js@0.1.0-beta.3): `managerClient()` is now the SDK's own
+// browser entry (`kaafil-js/client`), which wires this resource group for real.
+// The hand-rolled `on-ground/client.ts` that used to carry these calls has been
+// deleted. Badge `sdk`, not `raw`.
 import { managerClient } from '../live/transport';
-import { okLive, toFail } from '../live/lane';
+import { okLive, toFail, unwrapSdk } from '../live/lane';
 
 export const pickupsSpecs = (c: any) => ({
   'pickups.list': {
@@ -25,7 +30,7 @@ export const pickupsSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.pickups.listStops({ tripRef: p.tripRef });
+        const { data, meta } = unwrapSdk(await mc.pickups.list({ tripRef: p.tripRef }));
         return okLive(data, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -53,7 +58,7 @@ export const pickupsSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.pickups.boardTraveller({ tripRef: p.tripRef, pointId: p.stopId, travellerId: p.travellerId, status: 'BOARDED' });
+        const { data, meta } = unwrapSdk(await mc.pickups.board({ tripRef: p.tripRef, pointId: p.stopId, travellerId: p.travellerId, status: 'BOARDED' }));
         return okLive({
           stopId: data.stop.id, travellerId: data.travellerId, status: data.status,
           // The real stop carries rollup counts, not a per-traveller PENDING
@@ -94,7 +99,7 @@ export const pickupsSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.pickups.closeStop({ tripRef: p.tripRef, pointId: p.stopId, confirm: !!p.confirm, confirmedHeadCount: Number(p.confirmedHeadCount) });
+        const { data, meta } = unwrapSdk(await mc.pickups.close({ tripRef: p.tripRef, pointId: p.stopId, confirm: !!p.confirm, confirmedHeadCount: Number(p.confirmedHeadCount) }));
         return okLive({
           stopId: data.stop.id, status: data.stop.status,
           // The real `PickupCloseResult` reports aggregate counts, not a
@@ -125,7 +130,7 @@ export const pickupsSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.pickups.assignTraveller({ tripRef: p.tripRef, pointId: p.stopId, travellerId: p.travellerId });
+        const { data, meta } = unwrapSdk(await mc.pickups.assign({ tripRef: p.tripRef, pointId: p.stopId, travellerId: p.travellerId }));
         return okLive({ stopId: data.pickupPointId, travellerId: data.travellerId, status: 'PENDING', moved: data.moved, previousPickupPointId: data.previousPickupPointId }, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -145,7 +150,7 @@ export const pickupsSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.pickups.reopenStop({ tripRef: p.tripRef, pointId: p.stopId });
+        const { data, meta } = unwrapSdk(await mc.pickups.reopen({ tripRef: p.tripRef, pointId: p.stopId }));
         // `ReopenResult` carries the stop's own counts, not a per-traveller
         // NO_SHOW roster — `noShowsKept` has no honest real value to report.
         return okLive({ stopId: data.stop.id, status: data.stop.status, noShowsKept: null }, meta);

@@ -19,13 +19,14 @@
 //      `viewmodel.ts` read `res.data`/`res.meta` off that shape — so this
 //      un-flattens an sdk-lane body into the identical envelope, rather than
 //      making every screen that renders `run()` also learn a second shape.
-//      `../../../../on-ground/client.ts`'s `managerClient()` calls already
-//      return `{ data, meta }` (`OnGroundResponse<T>`) — those need no
-//      wrapping at all, only `okFromSdk`'s callers do.
+//      `managerClient()` is now the SDK's own browser entry too, and its
+//      resource methods return `KaafilResponse<T>` = `{ data, meta }`
+//      directly — those need no wrapping at all, only `okFromSdk`'s callers
+//      (which go through the backend's flattening `/sdk` dispatcher) do.
 //
 //   2. `toFail` — turns whatever a real call threw (a `kaafil-js`
-//      `KaafilError`, this repo's own `TransportError`, or `on-ground/
-//      client.ts`'s `OnGroundHttpError`) into the exact `{ err: {…} }` shape
+//      `KaafilError`, or this repo's own `TransportError`) into the exact
+//      `{ err: {…} }` shape
 //      `../sim/helpers.ts`'s `fail()` returns, so a live failure renders in
 //      `ResponsePanel` identically to a simulated one — see that file's own
 //      header for the field-by-field contract.
@@ -36,8 +37,7 @@
 // itself supply (or that the vendored `ERROR_CODE_TABLE` does not derive
 // from a code the response DID supply).
 
-import { ERROR_CODE_TABLE, isKaafilError, isRetryable, type KaafilErrorCode } from 'kaafil-js';
-import { OnGroundHttpError } from '../../../../on-ground/client';
+import { isKaafilError, isRetryable } from 'kaafil-js';
 import { TransportError } from './transport';
 
 export interface LiveOk {
@@ -56,36 +56,40 @@ export interface LiveFail {
   };
 }
 
-/** `kaafil-js`'s own `fromEnvelope` (`src/http/errors.ts`) picks the error
- * SUBCLASS a catalog code maps to and is not part of this package's public
- * surface, so this is that same mapping's name half, kept intentionally in
- * sync with that switch — re-check both if either changes. Only the twelve
- * codes that earn a dedicated class there are listed; every other catalog
- * code (module-local codes included) falls through to the same
- * `KaafilApiError` fallback `fromEnvelope`'s `default` branch uses. */
-const CODE_TO_ERROR_NAME: Readonly<Partial<Record<KaafilErrorCode, string>>> = {
-  RESOURCE_NOT_FOUND: 'KaafilNotFoundError',
-  PLAN_FEATURE_DISABLED: 'KaafilEntitlementError',
-  CAPABILITY_UNAVAILABLE: 'KaafilCapabilityUnavailableError',
-  READ_ONLY_ROLE: 'KaafilReadOnlyRoleError',
-  VALIDATION_ERROR: 'KaafilValidationError',
-  CONFLICT_VERSION: 'KaafilVersionConflictError',
-  LOCKED: 'KaafilLockedError',
-  RATE_LIMITED: 'KaafilRateLimitedError',
-  UNAUTHENTICATED: 'KaafilUnauthenticatedError',
-  SHARE_TOKEN_EXPIRED: 'KaafilShareTokenExpiredError',
-  SHARE_TOKEN_REVOKED: 'KaafilShareTokenRevokedError',
-  NOT_IMPLEMENTED: 'KaafilNotImplementedError',
-};
-
-function retryableForCode(code: string | undefined): 'yes' | 'no' {
-  const entry = code ? ERROR_CODE_TABLE[code as KaafilErrorCode] : undefined;
-  return entry && entry.retryability !== 'no' ? 'yes' : 'no';
-}
-
 /** Un-flattens a `kaafil-js` resource method's raw return value (`T & {
  * meta }`) into `{ data, meta }` — see this file's header, point 1. */
 export function okFromSdk(body: unknown): LiveOk {
+  const { meta, ...rest } = (body ?? {}) as { meta?: unknown; [k: string]: unknown };
+  return { data: rest, meta };
+}
+
+/**
+ * The direct-lane sibling of `okFromSdk`, for `managerClient()` calls that
+ * return a `KaafilResponse<T>` in-process rather than through the backend's
+ * `/sdk` dispatcher.
+ *
+ * `KaafilResponse<T>` is `T & { meta }` — FLATTENED, not `{ data, meta }`.
+ * The deleted `on-ground/client.ts` returned `{ data, meta }`, so every
+ * `live()` that used to destructure `const { data, meta } = await mc.x()`
+ * would, against the SDK, silently bind `data` to `undefined` and render an
+ * empty panel that reads exactly like a real empty response. This splits the
+ * envelope back apart explicitly so that cannot happen quietly.
+ *
+ * The array branch is not a nicety: several operations answer `data: T[]`
+ * (`pickups.list`, `collections.list`, `itinerary.changeLog.list`, …) and the
+ * SDK preserves array-ness by `Object.assign`-ing `meta` onto the array
+ * itself (`kaafil-js/src/http/client.ts`'s `attachMeta`, whose own comment
+ * says why). Rest-spreading that would produce `{0: …, 1: …}` and silently
+ * destroy `.map`/`.filter`/`.length` for every caller downstream.
+ *
+ * `data` is deliberately `any`: the spec files are `any`-typed throughout
+ * (they were ported from a plain-JS design file), so `unknown` here would
+ * force a cast at all forty-odd call sites without adding one real check.
+ */
+export function unwrapSdk(body: unknown): { data: any; meta: any } {
+  if (Array.isArray(body)) {
+    return { data: Array.from(body), meta: (body as unknown as { meta?: unknown }).meta };
+  }
   const { meta, ...rest } = (body ?? {}) as { meta?: unknown; [k: string]: unknown };
   return { data: rest, meta };
 }
@@ -150,19 +154,6 @@ export function toFail(e: unknown): LiveFail {
       },
     };
   }
-  if (e instanceof OnGroundHttpError) {
-    const name = (e.code && CODE_TO_ERROR_NAME[e.code as KaafilErrorCode]) || 'KaafilApiError';
-    return {
-      err: {
-        name,
-        code: e.code ?? null,
-        status: e.status,
-        message: e.message,
-        details: e.details ?? null,
-        retryable: retryableForCode(e.code),
-      },
-    };
-  }
   // A raw `fetch` that never resolved at all (the manager-lane call is a
   // direct browser->engine request, so this is a network/CORS ambiguity
   // against the ENGINE host, not the backend one `transport.ts`'s
@@ -175,7 +166,7 @@ export function toFail(e: unknown): LiveFail {
       code: null,
       status: null,
       message:
-        `This on-ground (manager-lane) call did not complete: ${message}. The engine host may ` +
+        `This manager-lane call did not complete: ${message}. The engine host may ` +
         "be unreachable, the session's baseUrl may be wrong, or the request was blocked before " +
         'any response arrived — there is no HTTP status to read here, so this is not a diagnosis, ' +
         'just the honest fact that nothing came back.',
