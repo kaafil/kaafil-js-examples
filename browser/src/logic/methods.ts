@@ -1,19 +1,25 @@
-// Ported verbatim from `.design/logic.js` lines 9-121 (the `methods = {...}`
-// class field on `Component`), re-badged against GAPS.md §5 (the per-operation
-// audit) to carry four states instead of the design's original three.
+// Ported from `.design/logic.js` lines 9-121 (the `methods = {...}` class field
+// on `Component`), re-badged against GAPS.md §5 (the per-operation audit).
 //
 // lane: B = runs on your CRM backend (API key) · D = runs on this device (manager session)
 //
-// state — four tones, GAPS.md §5, none of them interchangeable:
+// state — THREE tones now, none of them interchangeable:
 //   'sdk'      a typed kaafil-js method exists AND a shipped entry point satisfies its scheme —
 //              live via the SDK today.
-//   'raw'      the engine endpoint is live; no SDK client (KaafilClient wires only vendors+journey)
-//              can reach it — live via on-ground/client.ts with a manager bearer. An SDK gap, NOT a
-//              product gap: these calls run for real, same as 'sdk'.
 //   'plan'     no endpoint exists yet — "coming soon". Optional 5th tuple element is the phase number
 //              from implementation-plan/README.md when GAPS.md cites one.
 //   'console'  the operation is consoleAuth-only by deliberate design (boundary B1/B3) — no API key
 //              or manager credential will ever satisfy its scheme. Never "coming soon".
+//
+// ── THE FOURTH TONE IS GONE ────────────────────────────────────────────────
+// 'raw' meant "the endpoint is live, but no SDK client can reach it — live via
+// on-ground/client.ts with a manager bearer". It existed because KaafilClient
+// wired only `vendors` and `journey`, so all 44 managerAuth-only operations had
+// to be hand-rolled. `kaafil-js@0.1.0-beta.3` wires sixteen resource groups into
+// the browser entry, `on-ground/` has been DELETED, and every one of those 44
+// methods is now `sdk`. No method in this registry carries 'raw' any more, and
+// the tone has been removed rather than left defined-but-unused — a dead badge
+// in a legend is read as a live one.
 //
 // Tuple shape: [id, label, lane, state, phase?]
 export const METHODS: Record<string, [string, string, string, string, number?][]> = {
@@ -40,74 +46,74 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     ['trig', 'triggers.list', 'B', 'sdk']
   ],
   itinerary: [
-    ['read', 'itinerary.read', 'D', 'raw'],
-    ['add', 'items.add', 'D', 'raw'],
-    ['patch', 'items.patch', 'D', 'raw'],
-    ['reorder', 'items.reorder', 'D', 'raw'],
-    ['remove', 'items.remove', 'D', 'raw'],
-    ['log', 'changeLog.list', 'D', 'raw'],
-    ['delta', '?since= delta', 'D', 'raw']
+    ['read', 'itinerary.read', 'D', 'sdk'],
+    ['add', 'items.add', 'D', 'sdk'],
+    ['patch', 'items.patch', 'D', 'sdk'],
+    ['reorder', 'items.reorder', 'D', 'sdk'],
+    ['remove', 'items.remove', 'D', 'sdk'],
+    ['log', 'changeLog.list', 'D', 'sdk'],
+    ['delta', '?since= delta', 'D', 'sdk']
   ],
   rooming: [
-    ['read', 'rooming.read', 'D', 'raw'],
-    ['room', 'rooms.create', 'D', 'raw'],
-    ['assign', 'rooming.assign', 'D', 'raw'],
-    ['auto', 'auto-assign', 'D', 'raw']
+    ['read', 'rooming.read', 'D', 'sdk'],
+    ['room', 'rooms.create', 'D', 'sdk'],
+    ['assign', 'rooming.assign', 'D', 'sdk'],
+    ['auto', 'auto-assign', 'D', 'sdk']
   ],
   seating: [
-    ['read', 'seating.read', 'D', 'raw'],
-    ['veh', 'vehicles.create', 'D', 'raw'],
-    ['assign', 'seating.assign', 'D', 'raw'],
-    ['auto', 'auto-assign', 'D', 'raw']
+    ['read', 'seating.read', 'D', 'sdk'],
+    ['veh', 'vehicles.create', 'D', 'sdk'],
+    ['assign', 'seating.assign', 'D', 'sdk'],
+    ['auto', 'auto-assign', 'D', 'sdk']
   ],
   pickups: [
-    ['list', 'pickups.list', 'D', 'raw'],
-    ['assign', 'pickups.assign', 'D', 'raw'],
-    ['board', 'pickups.board', 'D', 'raw'],
-    ['close', 'pickups.close', 'D', 'raw'],
-    ['reopen', 'pickups.reopen', 'D', 'raw']
+    ['list', 'pickups.list', 'D', 'sdk'],
+    ['assign', 'pickups.assign', 'D', 'sdk'],
+    ['board', 'pickups.board', 'D', 'sdk'],
+    ['close', 'pickups.close', 'D', 'sdk'],
+    ['reopen', 'pickups.reopen', 'D', 'sdk']
   ],
   treks: [
-    ['board', 'treks.board', 'D', 'raw'],
-    ['postpone', 'treks.postpone', 'D', 'raw'],
-    ['walkin', 'walkIns.create', 'D', 'raw']
+    ['board', 'treks.board', 'D', 'sdk'],
+    ['postpone', 'treks.postpone', 'D', 'sdk'],
+    ['walkin', 'walkIns.create', 'D', 'sdk']
   ],
   checklists: [
-    ['read', 'checklists.read', 'D', 'raw'],
-    ['add', 'items.add', 'D', 'raw'],
-    ['toggle', 'items.toggle', 'D', 'raw'],
-    ['remove', 'items.remove', 'D', 'raw'],
+    ['read', 'checklists.read', 'D', 'sdk'],
+    ['add', 'items.add', 'D', 'sdk'],
+    ['toggle', 'items.toggle', 'D', 'sdk'],
+    ['remove', 'items.remove', 'D', 'sdk'],
     ['tpl', 'templates.list', 'B', 'sdk'],
     ['pull', 'templates.pull', 'B', 'sdk']
   ],
   webhooks: [
     ['events', 'events.list', 'B', 'sdk'],
     ['deliv', 'deliveries.list', 'B', 'sdk'],
-    ['burst', 'coalescing burst', 'D', 'raw'],
+    ['burst', 'coalescing burst', 'D', 'sdk'],
     ['redeliver', 'deliveries.redeliver', 'B', 'sdk']
   ],
   collections: [
-    ['read', 'collections.list', 'D', 'raw'],
-    ['eligible', 'collections.eligible', 'D', 'raw'],
-    ['record', 'collections.record', 'D', 'raw'],
-    ['void', 'collections.void', 'D', 'raw']
+    ['read', 'collections.list', 'D', 'sdk'],
+    ['eligible', 'collections.eligible', 'D', 'sdk'],
+    ['record', 'collections.record', 'D', 'sdk'],
+    ['void', 'collections.void', 'D', 'sdk']
   ],
   expenses: [
-    ['read', 'expenses.list', 'D', 'raw'],
-    ['log', 'expenses.log', 'D', 'raw'],
-    ['claim', 'claims.submit', 'D', 'raw'],
-    ['void', 'expenses.void', 'D', 'raw']
+    ['read', 'expenses.list', 'D', 'sdk'],
+    ['log', 'expenses.log', 'D', 'sdk'],
+    ['claim', 'claims.submit', 'D', 'sdk'],
+    ['void', 'expenses.void', 'D', 'sdk']
   ],
   float: [
-    ['read', 'float.balance', 'D', 'raw'],
-    ['issue', 'float.issue', 'D', 'raw'],
-    ['return', 'float.return', 'D', 'raw'],
-    ['adjust', 'float.adjust', 'D', 'raw']
+    ['read', 'float.balance', 'D', 'sdk'],
+    ['issue', 'float.issue', 'D', 'sdk'],
+    ['return', 'float.return', 'D', 'sdk'],
+    ['adjust', 'float.adjust', 'D', 'sdk']
   ],
   files: [
-    ['request', 'files.uploadRequest', 'D', 'raw'],
-    ['confirm', 'files.confirm', 'D', 'raw'],
-    ['read', 'files.read', 'D', 'raw']
+    ['request', 'files.uploadRequest', 'D', 'sdk'],
+    ['confirm', 'files.confirm', 'D', 'sdk'],
+    ['read', 'files.read', 'D', 'sdk']
   ],
   vendors: [
     ['list', 'vendors.list', 'B', 'sdk']
@@ -121,7 +127,7 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     // readAgencyEntitlement is consoleAuth per openapi.json — no API key will ever satisfy this
     // scheme (boundary B1). See StubCard for the 'console' tone this drives.
     ['read', 'entitlement.read', 'B', 'console'],
-    ['gate', 'a flag-off refusal', 'D', 'raw']
+    ['gate', 'a flag-off refusal', 'D', 'sdk']
   ],
   errors: [
     ['table', 'ERROR_CODE_TABLE', 'D', 'sdk'],
@@ -131,8 +137,21 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
   offline: [
     ['cursor', 'delta cursor', 'D', 'sdk'],
     ['idem', 'idempotencyKey', 'D', 'sdk'],
-    // no-offline-outbox: the queue, drain loop, backoff ladder and blob lane are unbuilt.
-    // implementation-plan/README.md phase table — Phase 15, not started.
-    ['outbox', 'outbox drain', 'D', 'plan', 15]
+    // Was ['outbox', …, 'plan', 15] — the one SIM-ONLY card in the whole
+    // playground, on `no-offline-outbox`. Phase 15 shipped in beta.3: the queue
+    // is a durable IndexedDB store, the drain loop is FIFO-per-trip, and both
+    // run for real against the engine here.
+    ['outbox', 'outbox drain', 'D', 'sdk'],
+    ['pull', 'consolidated pull', 'D', 'sdk'],
+    ['push', 'batched push', 'D', 'sdk'],
+    ['reset', 'drop the local store', 'D', 'sdk']
+  ],
+  closeout: [
+    ['get', 'closeout.get', 'D', 'sdk'],
+    ['handover', 'closeout.saveHandover', 'D', 'sdk'],
+    ['lock', 'closeout.lock', 'D', 'sdk'],
+    // apiKeyAuth-only: a back-office reopen, never the locking manager's call.
+    ['unlock', 'closeout.unlock', 'B', 'sdk'],
+    ['pdf', 'closeout.exportPdf', 'D', 'sdk']
   ]
 };

@@ -118,7 +118,7 @@ const engineBaseUrl = KAAFIL_BASE_URL ?? resolveBaseUrl(environment);
  * shape a partner key must never take.**
  *
  * Every dotted path below is enumerated by hand against
- * `kaafil-js/src/resources/*.ts` and `GAPS.md §5`'s three-state audit —
+ * `kaafil-js/src/resources/*.ts` and `GAPS.md §5`'s per-operation audit —
  * every one of these methods runs for real against a live engine. Anything
  * NOT in this `Set` is refused with `403` naming the path, never silently
  * dropped or partially executed.
@@ -186,6 +186,15 @@ const ALLOWLISTED_SDK_PATHS: ReadonlySet<string> = new Set([
 
   'treks.board',
   'treks.walkIns.meta',
+
+  // Close-out. `closeout.get` is here alongside the manager lane's own copy
+  // because a CRM legitimately reads a trip's close-out state on its API key.
+  // `closeout.unlock` is here because it is the ONLY way to reach it at all —
+  // `unlockCloseout` is `['apiKeyAuth']`, so `KaafilClient` throws
+  // `UnsatisfiableSchemeError` on it before building a request. Reopening a
+  // locked trip is a back-office decision, not the locking manager's.
+  'closeout.get',
+  'closeout.unlock',
 ]);
 
 class SdkPathNotAllowlistedError extends Error {

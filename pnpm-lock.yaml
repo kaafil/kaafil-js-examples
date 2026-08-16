@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       kaafil-js:
-        specifier: 0.1.0-beta.2
-        version: 0.1.0-beta.2
+        specifier: 0.1.0-beta.3
+        version: 0.1.0-beta.3
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -786,8 +786,8 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
-  kaafil-js@0.1.0-beta.2:
-    resolution: {integrity: sha512-7+0QzW4HhEr5BA9sbgZbu7736AjCgJs0bpO4x9mTWlwGpWcSIg6EKH/FZ5H7xQVumpqdfFPqlRpfPu1XTtwphw==}
+  kaafil-js@0.1.0-beta.3:
+    resolution: {integrity: sha512-6l8rflvRMkaSJA5WFgjQ0h9BdZOVoNgxxkygqAyejdyl5XfltCQ6wuIXh5iIbWsBPXlHxP+XNsVSJfM7VsIkBA==}
     engines: {node: '>=20.11'}
 
   loose-envify@1.4.0:
@@ -1590,7 +1590,7 @@ snapshots:
 
   json5@2.2.3: {}
 
-  kaafil-js@0.1.0-beta.2: {}
+  kaafil-js@0.1.0-beta.3: {}
 
   loose-envify@1.4.0:
     dependencies:

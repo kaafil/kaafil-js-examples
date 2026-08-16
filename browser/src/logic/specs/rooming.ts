@@ -9,14 +9,19 @@
 // `stayWindowId` the simulated screen has no parameter for (rooming here has
 // exactly one implicit stay window); it is resolved with a live
 // `rooming.board` read first, never guessed. `autoAssign` also does NOT accept
-// a `rules`/`strategyOrder` body field in the real contract (`on-ground/
+// a `rules`/`strategyOrder` body field in the real contract (the real contract, `
 // client.ts`'s `autoAssign` signature takes only `{tripRef, stayWindowId,
 // dryRun}`) — the screen's `strategyOrder` param has nothing to bind to
 // server-side, so `live()` sends the real body only, and `req()` below is
 // corrected to stop promising a field the engine ignores.
+//
+// LIVE WIRING (kaafil-js@0.1.0-beta.3): `managerClient()` is now the SDK's own
+// browser entry (`kaafil-js/client`), which wires this resource group for real.
+// The hand-rolled `on-ground/client.ts` that used to carry these calls has been
+// deleted. Badge `sdk`, not `raw`.
 import { managerClient } from '../live/transport';
-import { okLive, toFail } from '../live/lane';
-import { isTombstone } from '../../../../on-ground/types';
+import { okLive, toFail, unwrapSdk } from '../live/lane';
+import { isTombstone } from 'kaafil-js/client';
 import { AUTO_ASSIGN_REASONS, cannedPlanFingerprint } from '../sim/fixtures';
 
 /** Resolves the trip's one live stay window off a fresh `rooming.board`
@@ -25,7 +30,7 @@ import { AUTO_ASSIGN_REASONS, cannedPlanFingerprint } from '../sim/fixtures';
  * `TransportError` a direct call would, so the caller's existing `catch`
  * handles it identically. */
 async function resolveStayWindowId(mc: any, tripRef: string): Promise<string | null> {
-  const { data } = await mc.rooming.board({ tripRef });
+  const { data } = unwrapSdk(await mc.rooming.read({ tripRef }));
   return data.stayWindowId || (data.windows[0] && data.windows[0].stayWindowId) || null;
 }
 
@@ -47,7 +52,7 @@ export const roomingSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.rooming.board({ tripRef: p.tripRef });
+        const { data, meta } = unwrapSdk(await mc.rooming.read({ tripRef: p.tripRef }));
         const rooms = data.rooms.filter((r: any) => !isTombstone(r as any));
         return okLive({ rooms, unassigned: data.unassigned, summary: { rosterCount: data.summary.rosterCount, assignedCount: data.summary.assignedCount, unassignedCount: data.summary.unassignedCount } }, meta);
       } catch (e: any) { return toFail(e); }
@@ -71,7 +76,7 @@ export const roomingSpecs = (c: any) => ({
         const mc = managerClient();
         const stayWindowId = await resolveStayWindowId(mc, p.tripRef);
         if (!stayWindowId) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'This trip has no stay window to create a room under yet.');
-        const { data: room, meta } = await mc.rooming.createRoom({ tripRef: p.tripRef, stayWindowId, code: p.code, roomType: p.roomType, capacity: Number(p.capacity) });
+        const { data: room, meta } = unwrapSdk(await mc.rooming.rooms.create({ tripRef: p.tripRef, stayWindowId, code: p.code, roomType: p.roomType, capacity: Number(p.capacity) }));
         return okLive(room, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -103,7 +108,7 @@ export const roomingSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.rooming.assign({ tripRef: p.tripRef, travellerId: p.travellerId, roomId: p.roomId, bedLabel: p.bedLabel });
+        const { data, meta } = unwrapSdk(await mc.rooming.assign({ tripRef: p.tripRef, travellerId: p.travellerId, roomId: p.roomId, bedLabel: p.bedLabel }));
         return okLive({ travellerId: data.travellerId, roomId: data.roomId, bedLabel: data.bedLabel, assignSource: 'MANUAL', displacedTravellerId: data.displacedTravellerId, rooms: data.rooms }, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -147,7 +152,7 @@ export const roomingSpecs = (c: any) => ({
         // The real engine takes no `rules`/`strategyOrder` body field — the
         // screen's param has nothing to bind to server-side (see this file's
         // header). `dryRun` is the only real lever.
-        const { data, meta } = await mc.rooming.autoAssign({ tripRef: p.tripRef, stayWindowId, dryRun: !!p.dryRun });
+        const { data, meta } = unwrapSdk(await mc.rooming.autoAssign({ tripRef: p.tripRef, stayWindowId, dryRun: !!p.dryRun }));
         return okLive(data, meta);
       } catch (e: any) { return toFail(e); }
     }

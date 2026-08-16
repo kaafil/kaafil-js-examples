@@ -65,20 +65,39 @@ import {
   UnsatisfiableSchemeError,
 } from 'kaafil-js';
 
-// The manager's half of the day (steps 13-21) does NOT go through `kaafil-js`,
-// and that is a statement about the SDK's current shape rather than a design
-// choice. `kaafil.itinerary` and `kaafil.rooming` DO exist — step 22 uses them —
-// but only on the API-key client, and thirteen of those seventeen operations are
-// writes that accept `managerAuth` alone. `KaafilClient`, the one entry that can
-// hold a manager session, does not expose either group yet, so no SDK code path
-// can perform an on-ground write today. `../on-ground/` is the deliberately small
-// stand-in that can, and its own header lists every SDK service it does without.
-// It is deleted, not migrated, the day `client.itinerary`/`client.rooming` exist.
-import { occupantChip, parseToneToken } from '../on-ground/chip';
-import { createOnGroundClient, OnGroundHttpError } from '../on-ground/client';
-import type { ItineraryItem, ItineraryRead, Occupant, Room, Vehicle } from '../on-ground/types';
-import { isTombstone } from '../on-ground/types';
-import { putPresignedBytes } from '../on-ground/upload';
+// The manager's half of the day (steps 13-21) now goes through `kaafil-js`
+// like everything else.
+//
+// It used to not. `KaafilClient` — the one entry point that can hold a manager
+// session — wired only `vendors` and `journey`, so the 44 `managerAuth`-only
+// on-ground operations had no SDK code path at all, and `../on-ground/` was a
+// hand-rolled raw-HTTP stand-in whose own header listed every SDK service it
+// did without: the retry ladder, typed errors, idempotency keys, 401 rotation.
+// Its header also said it would be deleted, not migrated, the day
+// `client.itinerary`/`client.rooming` existed.
+//
+// `kaafil-js@0.1.0-beta.3` is that day. Sixteen resource groups are wired into
+// `kaafil-js/client`, `../on-ground/` is DELETED, and `onGround` below is a
+// `KaafilClient` with the manager session open on it. The variable keeps its
+// name because what it means has not changed — the manager's own credential on
+// the manager's own device — only what carries it has.
+//
+// Two small Node-side helpers moved to `./support/` rather than dying with it:
+// `chip.ts` (the occupant chip the ENGINE's glyph+tone drive) and `upload.ts`
+// (a docker-compose Host-header workaround, not a contract fact). `./support/
+// raw.ts` is new and is the only hand-rolled request left anywhere here — see
+// its header for the one thing a typed client structurally cannot do.
+import {
+  createInMemoryStorageAdapter,
+  type DeltaTombstone,
+  isTombstone,
+  KaafilApiError,
+  KaafilClient,
+  type ResponseMeta,
+} from 'kaafil-js/client';
+import { occupantChip, parseToneToken } from './support/chip';
+import { rawProbe } from './support/raw';
+import { putPresignedBytes } from './support/upload';
 
 // ---------------------------------------------------------------------------
 // Tiny local assert helper. No test framework: this script IS the check, and
@@ -157,6 +176,64 @@ function requireEnv(name: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// The on-ground response shapes, DERIVED from the SDK's own resource methods
+// rather than restated.
+//
+// `../on-ground/types.ts` used to hand-maintain 877 lines of these — a second
+// copy of the contract with its own drift, which is exactly what it was
+// criticised for. Every alias below is computed from `KaafilClient`'s
+// generated return types, so a contract change that moves a field is a
+// COMPILE error here on the next `pnpm gen:types`, not a runtime surprise in
+// step 19.
+// ---------------------------------------------------------------------------
+
+/** A resource method's payload with `meta` removed. `KaafilResponse<T>` is
+ * `T & { meta }` — flattened, NOT `{ data, meta }` (which is what the deleted
+ * raw client returned). See `unwrap` below. */
+type Payload<TMethod extends (...args: never[]) => unknown> = Omit<
+  Awaited<ReturnType<TMethod>>,
+  'meta'
+>;
+
+type ItineraryRead = Payload<KaafilClient['itinerary']['read']>;
+type ItineraryItem = Exclude<ItineraryRead['items'][number], DeltaTombstone>;
+type RoomingBoard = Payload<KaafilClient['rooming']['read']>;
+type Room = Exclude<RoomingBoard['rooms'][number], DeltaTombstone>;
+type Occupant = NonNullable<Room['beds'][number]['occupant']>;
+type SeatingBoard = Payload<KaafilClient['seating']['read']>;
+type Vehicle = Exclude<SeatingBoard['vehicles'][number], DeltaTombstone>;
+type StayWindowRow = Payload<KaafilClient['rooming']['stayWindows']['list']>[number];
+type LiveStayWindow = Exclude<StayWindowRow, DeltaTombstone>;
+type PickupStopRow = Payload<KaafilClient['pickups']['list']>[number];
+type LivePickupStop = Exclude<PickupStopRow, DeltaTombstone>;
+
+/**
+ * Splits a `KaafilResponse<T>` back into `{ data, meta }`.
+ *
+ * This is not cosmetic. The deleted raw client returned `{ data, meta }` and
+ * every step below destructures `const { data } = await …`. The SDK returns
+ * `T & { meta }`, so leaving those destructures alone would bind `data` to
+ * `undefined` — and `undefined.items` throws in a way that reads like a
+ * missing field rather than a wrong envelope. Doing the split in ONE named
+ * place is what keeps that from being re-learned at forty call sites.
+ *
+ * The array branch matters for the same reason it does in the browser half:
+ * list operations answer `T[]` and the SDK `Object.assign`es `meta` onto the
+ * array itself, so a rest-spread would turn it into `{0: …, 1: …}` and destroy
+ * `.filter`/`.map`/`.length`.
+ */
+function unwrap<T>(response: T & { readonly meta: ResponseMeta }): { data: T; meta: ResponseMeta } {
+  if (Array.isArray(response)) {
+    return {
+      data: Array.from(response) as unknown as T,
+      meta: (response as unknown as { meta: ResponseMeta }).meta,
+    };
+  }
+  const { meta, ...rest } = response as Record<string, unknown> & { meta: ResponseMeta };
+  return { data: rest as unknown as T, meta };
+}
+
+// ---------------------------------------------------------------------------
 // Delta-row helpers for the on-ground steps. A `?since=` response mixes live
 // rows and tombstones in ONE array, so every read of one has to narrow first —
 // these exist so no step below can quietly treat a tombstone as a row.
@@ -164,6 +241,20 @@ function requireEnv(name: string): string {
 
 function liveItems(read: ItineraryRead): readonly ItineraryItem[] {
   return read.items.filter((row): row is ItineraryItem => !isTombstone(row));
+}
+
+/** The SDK types `stayWindows.list` and `pickups.list` as `(Row | Tombstone)[]`
+ * — a real narrowing the deleted raw client did NOT do: its hand-written types
+ * declared plain rows, so a tombstone in either list would have been read as a
+ * row with every field `undefined` and silently compared as such. These two
+ * exist so the SDK's honesty about the delta stream is kept rather than cast
+ * away. */
+function liveStayWindows(rows: StayWindowRow[]): LiveStayWindow[] {
+  return rows.filter((row): row is LiveStayWindow => !isTombstone(row));
+}
+
+function livePickupStops(rows: PickupStopRow[]): LivePickupStop[] {
+  return rows.filter((row): row is LivePickupStop => !isTombstone(row));
 }
 
 function requireItem(read: ItineraryRead, itemId: string, label: string): ItineraryItem {
@@ -788,9 +879,20 @@ async function main(): Promise<void> {
     );
     passed++;
 
-    const onGround = createOnGroundClient({
-      baseUrl,
+    // The manager's device, as `KaafilClient`. This is the SAME entry point
+    // the browser half opens (`browser/src/logic/live/transport.ts`), opened
+    // the same way, against the same base URL — which is what makes the two
+    // halves of this repo a check on each other rather than two demos.
+    //
+    // `session.open` takes the pair `mintManagerToken` just returned; rotation
+    // from here on is the SDK's, automatic, including on a mid-run 401. The
+    // deleted raw client re-implemented that by hand and got a narrower
+    // version of it.
+    const onGround = new KaafilClient({ environment: 'test', baseUrl });
+    onGround.session.open({
       accessToken: managerSession.accessToken,
+      refreshToken: managerSession.refreshToken,
+      expiresAt: managerSession.expiresAt,
     });
 
     // -------------------------------------------------------------------
@@ -806,7 +908,7 @@ async function main(): Promise<void> {
       13,
       'itinerary.read — days 0..durationDays-1 were materialised without anyone creating them',
       async () => {
-        const { data } = await onGround.itinerary.read({ tripRef: onGroundTripRef });
+        const { data } = unwrap(await onGround.itinerary.read({ tripRef: onGroundTripRef }));
 
         assertEquals(
           data.days.length,
@@ -875,7 +977,7 @@ async function main(): Promise<void> {
       'three items added to today — the server assigns sortOrder 0,1,2 and refuses a client that sends one',
       async () => {
         const ids: string[] = [];
-        const requests: { title: string; body: Parameters<typeof onGround.itinerary.addItem>[0] }[] = [
+        const requests: { title: string; body: Parameters<typeof onGround.itinerary.items.add>[0] }[] = [
           {
             title: 'Breakfast at the lodge',
             body: {
@@ -909,7 +1011,7 @@ async function main(): Promise<void> {
         ];
 
         for (const [index, request] of requests.entries()) {
-          const { data } = await onGround.itinerary.addItem(request.body);
+          const { data } = unwrap(await onGround.itinerary.items.add(request.body));
           assertEquals(data['sortOrder'], index, `"${request.title}" was not appended at position ${String(index)}`);
           assertEquals(data['version'], 1, `"${request.title}" was created at a version other than 1`);
           ids.push(String(data['id']));
@@ -927,21 +1029,22 @@ async function main(): Promise<void> {
         // has no `sortOrder` field to send, which is the ordinary way a consumer
         // finds this out. `.strict()` bodies everywhere mean the engine did not
         // have to write this rule; it would have had to weaken a schema to break it.
-        try {
-          await onGround.request({
-            method: 'POST',
-            path: `/api/v1/trips/${encodeURIComponent(onGroundTripRef)}/itinerary/items`,
-            body: { isoDate: todayCard.isoDate, title: 'Client-ordered item', sortOrder: 0 },
-          });
-          throw new AssertionFailure('a client-supplied sortOrder was accepted');
-        } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) {
-            throw err;
-          }
-          assertEquals(err.status, 422, 'a client-supplied sortOrder should be a 422');
-          assertEquals(err.code, 'VALIDATION_ERROR', 'the refusal should be a validation error');
-          console.log('  a client-supplied sortOrder → 422 VALIDATION_ERROR (rejected, never silently ignored)');
-        }
+        // `rawProbe` and not the SDK, because `AddItineraryItemRequest` has no
+        // `sortOrder` field — the typed client structurally CANNOT send this
+        // body, which is the ordinary way a consumer discovers the rule. See
+        // `./support/raw.ts` for why that one escape hatch exists and what it
+        // is explicitly not for. It returns the refusal rather than throwing
+        // it, so there is nothing to catch here.
+        const sortOrderProbe = await rawProbe({
+          baseUrl,
+          accessToken: managerSession.accessToken,
+          method: 'POST',
+          path: `/api/v1/trips/${encodeURIComponent(onGroundTripRef)}/itinerary/items`,
+          body: { isoDate: todayCard.isoDate, title: 'Client-ordered item', sortOrder: 0 },
+        });
+        assertEquals(sortOrderProbe.status, 422, 'a client-supplied sortOrder should be a 422');
+        assertEquals(sortOrderProbe.code, 'VALIDATION_ERROR', 'the refusal should be a validation error');
+        console.log('  a client-supplied sortOrder → 422 VALIDATION_ERROR (rejected, never silently ignored)');
 
         return { breakfastId: ids[0] ?? '', freeMorningId: ids[1] ?? '', walkId: ids[2] ?? '' };
       },
@@ -968,10 +1071,10 @@ async function main(): Promise<void> {
       15,
       'LIVE is derived, never stored — and an untimed item never reads LIVE even mid-day',
       async () => {
-        const { data } = await onGround.itinerary.read({
+        const { data } = unwrap(await onGround.itinerary.read({
           tripRef: onGroundTripRef,
           dayIndex: todayCard.dayIndex,
-        });
+        }));
 
         const breakfast = requireItem(data, addedItems.breakfastId, 'step 15');
         const freeMorning = requireItem(data, addedItems.freeMorningId, 'step 15');
@@ -985,21 +1088,21 @@ async function main(): Promise<void> {
         // enforcement point: the PATCH body's status union omits it outright, so
         // a client cannot pin a card as live and leave it live after the moment
         // passed. `PLANNED|COMPLETED|SKIPPED` is the whole vocabulary.
-        try {
-          await onGround.itinerary.patchItem({
-            tripRef: onGroundTripRef,
-            itemId: addedItems.freeMorningId,
-            ifMatch: freeMorning.version,
-            patch: { status: 'LIVE' },
-          });
-          throw new AssertionFailure('a client was allowed to write status LIVE');
-        } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) {
-            throw err;
-          }
-          assertEquals(err.status, 422, 'writing LIVE should be a 422');
-          assertEquals(err.code, 'VALIDATION_ERROR', 'writing LIVE should fail validation');
-        }
+        // Same shape as step 14's `sortOrder` probe, and for the same reason:
+        // `PatchItineraryItemRequest['status']` is `PLANNED|COMPLETED|SKIPPED`,
+        // so `kaafil-js` will not compile a call that sends `LIVE`. The type
+        // system enforcing it CLIENT-side is a second, independent guard — but
+        // it is not the one this step is about, so the probe goes below the
+        // type layer to prove the SERVER refuses it too.
+        const liveWriteProbe = await rawProbe({
+          baseUrl,
+          accessToken: managerSession.accessToken,
+          method: 'PATCH',
+          path: `/api/v1/trips/${encodeURIComponent(onGroundTripRef)}/itinerary/items/${encodeURIComponent(addedItems.freeMorningId)}`,
+          body: { status: 'LIVE' },
+        });
+        assertEquals(liveWriteProbe.status, 422, 'writing LIVE should be a 422');
+        assertEquals(liveWriteProbe.code, 'VALIDATION_ERROR', 'writing LIVE should fail validation');
 
         console.log(`  "${breakfast.title}" (${String(breakfast.startTime)}) → ${breakfast.status}`);
         console.log(`  "${freeMorning.title}" (untimed) → ${freeMorning.status} — the clock has no say here`);
@@ -1022,25 +1125,25 @@ async function main(): Promise<void> {
       16,
       'complete one item and reorder another — the day stays densely ordered and no startTime moves',
       async () => {
-        const before = await onGround.itinerary.read({
+        const before = unwrap(await onGround.itinerary.read({
           tripRef: onGroundTripRef,
           dayIndex: todayCard.dayIndex,
-        });
+        }));
         const startTimesBefore = new Map(
           liveItems(before.data).map((item) => [item.id, item.startTime] as const),
         );
 
         const breakfast = requireItem(before.data, addedItems.breakfastId, 'step 16');
-        const completed = await onGround.itinerary.patchItem({
+        const completed = unwrap(await onGround.itinerary.items.patch({
           tripRef: onGroundTripRef,
           itemId: breakfast.id,
           // The version from the read that produced this row — `If-Match` here is
           // a row version, not an ETag. A MISSING header is not "no opinion": the
           // engine reads it as a version that can never match and answers 409, so
           // an unconditional write is impossible rather than merely discouraged.
-          ifMatch: breakfast.version,
-          patch: { status: 'COMPLETED' },
-        });
+          version: breakfast.version,
+          status: 'COMPLETED',
+        }));
         assertEquals(completed.data['status'], 'COMPLETED', 'the item did not complete');
         assertEquals(
           completed.data['version'],
@@ -1048,11 +1151,11 @@ async function main(): Promise<void> {
           'a successful guarded write did not bump the version',
         );
 
-        const reorder = await onGround.itinerary.reorderItem({
+        const reorder = unwrap(await onGround.itinerary.items.reorder({
           tripRef: onGroundTripRef,
           itemId: addedItems.walkId,
           index: 0,
-        });
+        }));
         assertEquals(reorder.data.moved, true, 'the reorder reported no movement');
 
         const run = reorder.data.items;
@@ -1123,28 +1226,28 @@ async function main(): Promise<void> {
         // back from the cursor taken next. See the note above.
         await sleep(6_000);
 
-        const sync = await onGround.itinerary.read({ tripRef: onGroundTripRef });
+        const sync = unwrap(await onGround.itinerary.read({ tripRef: onGroundTripRef }));
         const cursor = sync.meta.serverTime;
         const knownIds = new Set(liveItems(sync.data).map((item) => item.id));
         console.log(`  cursor = meta.serverTime of the last full read = ${cursor}`);
 
         const freeMorning = requireItem(sync.data, addedItems.freeMorningId, 'step 17');
-        await onGround.itinerary.patchItem({
+        unwrap(await onGround.itinerary.items.patch({
           tripRef: onGroundTripRef,
           itemId: freeMorning.id,
-          ifMatch: freeMorning.version,
-          patch: { title: 'Free morning (bazaar optional)' },
-        });
+          version: freeMorning.version,
+          title: 'Free morning (bazaar optional)',
+        }));
 
         const walk = requireItem(sync.data, addedItems.walkId, 'step 17');
-        const deleted = await onGround.itinerary.deleteItem({
+        const deleted = unwrap(await onGround.itinerary.items.remove({
           tripRef: onGroundTripRef,
           itemId: walk.id,
-          ifMatch: walk.version,
-        });
+          version: walk.version,
+        }));
         assertEquals(deleted.data['_tombstone'], true, 'a delete did not answer with a tombstone');
 
-        const delta = await onGround.itinerary.read({ tripRef: onGroundTripRef, since: cursor });
+        const delta = unwrap(await onGround.itinerary.read({ tripRef: onGroundTripRef, since: cursor }));
         const rows = delta.data.items;
 
         assertEquals(rows.length, 2, 'the delta did not carry exactly the two rows that changed');
@@ -1196,9 +1299,10 @@ async function main(): Promise<void> {
       async () => {
         // Materialised by trip ingest, from the trip's own dates — the manager
         // did not create it, exactly as with the itinerary's days.
-        const windows = await onGround.rooming.listStayWindows({ tripRef: onGroundTripRef });
-        assertTrue(windows.data.length >= 1, 'an ingested trip had no stay window at all');
-        const stayWindow = windows.data[0];
+        const windows = unwrap(await onGround.rooming.stayWindows.list({ tripRef: onGroundTripRef }));
+        const liveWindows = liveStayWindows([...windows.data]);
+        assertTrue(liveWindows.length >= 1, 'an ingested trip had no stay window at all');
+        const stayWindow = liveWindows[0];
         if (stayWindow === undefined) {
           throw new AssertionFailure('unreachable: the stay-window list is non-empty');
         }
@@ -1206,13 +1310,13 @@ async function main(): Promise<void> {
 
         const rooms: Room[] = [];
         for (const code of ['L-101', 'L-102']) {
-          const created = await onGround.rooming.createRoom({
+          const created = unwrap(await onGround.rooming.rooms.create({
             tripRef: onGroundTripRef,
             stayWindowId: stayWindow.id,
             code,
             capacity: 3,
             roomType: 'SHARED',
-          });
+          }));
           // Beds are SYNTHESISED from capacity — `A`..`H` — rather than stored.
           // A client never posts a bed list, and cannot get one out of step.
           assertEquals(created.data.beds.length, 3, `room ${code} did not synthesise three beds`);
@@ -1221,29 +1325,29 @@ async function main(): Promise<void> {
         }
         console.log(`  created ${String(rooms.length)} rooms: ${rooms.map((r) => `${r.code}[${r.beds.map((b) => b.bedLabel).join('')}]`).join(' ')}`);
 
-        const preview = await onGround.rooming.autoAssign({
+        const preview = unwrap(await onGround.rooming.autoAssign({
           tripRef: onGroundTripRef,
           stayWindowId: stayWindow.id,
           dryRun: true,
-        });
+        }));
         assertEquals(preview.data.dryRun, true, 'the preview did not report itself as a dry run');
         assertTrue(preview.data.plan.length > 0, 'the preview planned nobody');
 
         // A dry run that wrote something would still return a plausible plan, so
         // the board is read BETWEEN the two calls. Zero occupied beds is the
         // whole claim of the word "dry".
-        const between = await onGround.rooming.board({ tripRef: onGroundTripRef });
+        const between = unwrap(await onGround.rooming.read({ tripRef: onGroundTripRef }));
         const occupiedAfterPreview = between.data.rooms
           .filter((row): row is Room => !isTombstone(row))
           .flatMap((room) => room.beds)
           .filter((bed) => bed.occupant !== null).length;
         assertEquals(occupiedAfterPreview, 0, 'the dry run wrote to the board');
 
-        const apply = await onGround.rooming.autoAssign({
+        const apply = unwrap(await onGround.rooming.autoAssign({
           tripRef: onGroundTripRef,
           stayWindowId: stayWindow.id,
           dryRun: false,
-        });
+        }));
         assertEquals(apply.data.dryRun, false, 'the apply reported itself as a dry run');
 
         assertJsonEquals(apply.data.plan, preview.data.plan, 'the applied plan differs from the preview');
@@ -1280,7 +1384,7 @@ async function main(): Promise<void> {
       19,
       'occupant chips render from the server-supplied glyph and tone — no client-side colour maths',
       async () => {
-        const board = await onGround.rooming.board({ tripRef: onGroundTripRef });
+        const board = unwrap(await onGround.rooming.read({ tripRef: onGroundTripRef }));
         const rooms = board.data.rooms.filter((row): row is Room => !isTombstone(row));
         const occupants: Occupant[] = rooms
           .flatMap((room) => room.beds)
@@ -1356,7 +1460,7 @@ async function main(): Promise<void> {
     // -------------------------------------------------------------------
 
     await step(20, "the itinerary change log — the day's edits, as sentences the server rendered", async () => {
-      const log = await onGround.itinerary.changeLog({ tripRef: onGroundTripRef });
+      const log = unwrap(await onGround.itinerary.changeLog.list({ tripRef: onGroundTripRef }));
       const entries = log.data;
       assertTrue(entries.length > 0, 'the change log was empty after a day of edits');
 
@@ -1444,11 +1548,11 @@ async function main(): Promise<void> {
         // exactly what a manager's thumb does.
         const burstDay = firstRead.days.find((card) => card.position === 'future') ?? todayCard;
         for (const n of [1, 2, 3]) {
-          await onGround.itinerary.addItem({
+          unwrap(await onGround.itinerary.items.add({
             tripRef: onGroundTripRef,
             isoDate: burstDay.isoDate,
             title: `Burst edit ${String(n)}`,
-          });
+          }));
         }
         console.log(`  3 items added to day ${String(burstDay.dayIndex)} inside one window`);
 
@@ -1678,27 +1782,27 @@ async function main(): Promise<void> {
       24,
       'seating: a BUS with no layout, a BUS refused a layout, and a FLIGHT with one',
       async () => {
-        const bus = await onGround.seating.createVehicle({
+        const bus = unwrap(await onGround.seating.vehicles.create({
           tripRef: onGroundTripRef,
           regNo: `HP-BUS-${runSuffix}`,
           type: 'BUS',
           capacity: 40,
-        });
+        }));
         assertEquals(bus.data.layout, null, 'the bus was created with a layout');
         assertEquals(bus.data.seatMapped, false, 'a layout-less bus reported seatMapped');
         console.log(`  BUS ${bus.data.regNo} — seatMapped=false, capacity=${String(bus.data.capacity)}`);
 
         try {
-          await onGround.seating.createVehicle({
+          unwrap(await onGround.seating.vehicles.create({
             tripRef: onGroundTripRef,
             regNo: `HP-BUS-REFUSED-${runSuffix}`,
             type: 'BUS',
             capacity: 40,
             layout: 'TWO_TWO',
-          });
+          }));
           throw new AssertionFailure('a BUS was allowed to carry a seat layout');
         } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) throw err;
+          if (!(err instanceof KaafilApiError)) throw err;
           assertEquals(err.status, 422, 'a road vehicle with a layout should be a 422');
           assertEquals(err.code, 'VALIDATION_ERROR', 'the refusal should be a validation error');
           console.log(
@@ -1708,13 +1812,13 @@ async function main(): Promise<void> {
           );
         }
 
-        const flight = await onGround.seating.createVehicle({
+        const flight = unwrap(await onGround.seating.vehicles.create({
           tripRef: onGroundTripRef,
           regNo: `6E-${runSuffix}`,
           type: 'FLIGHT',
           capacity: 8,
           layout: 'TWO_TWO',
-        });
+        }));
         assertEquals(flight.data.seatMapped, true, 'a FLIGHT with a layout did not report seatMapped');
         assertTrue(flight.data.seats.length === 8, 'the flight did not synthesise 8 seats from (TWO_TWO, 8)');
         console.log(`  FLIGHT ${flight.data.regNo} — seatMapped=true, seats=${flight.data.seats.map((s) => s.seatLabel).join(',')}`);
@@ -1724,7 +1828,7 @@ async function main(): Promise<void> {
     );
     passed++;
 
-    const seatingRoster = await onGround.seating.board({ tripRef: onGroundTripRef });
+    const seatingRoster = unwrap(await onGround.seating.read({ tripRef: onGroundTripRef }));
     const seatingRosterRows = seatingRoster.data.unassignedPool;
 
     // -------------------------------------------------------------------
@@ -1736,11 +1840,11 @@ async function main(): Promise<void> {
 
     await step(25, 'seating: assign a traveller to the seat-less bus — seatLabel stays null', async () => {
       const priya = travellerIdByName(seatingRosterRows, 'Asha Rao', 'step 25');
-      const result = await onGround.seating.assign({
+      const result = unwrap(await onGround.seating.assign({
         tripRef: onGroundTripRef,
         travellerId: priya,
         vehicleId: fleet.busId,
-      });
+      }));
       assertEquals(result.data.vehicleId, fleet.busId, 'the traveller did not land on the bus');
       assertEquals(result.data.seatLabel, null, 'a seat-less vehicle produced a non-null seatLabel');
       console.log(`  Asha Rao → ${result.data.vehicleId} (bus), seatLabel=null — "on Bus 2" is a complete answer`);
@@ -1760,27 +1864,27 @@ async function main(): Promise<void> {
       'seating: assign on the FLIGHT — one seat immediately, one "seat pending" and equally legal',
       async () => {
         const kabir = travellerIdByName(seatingRosterRows, 'Kabir Rao', 'step 26');
-        const seated = await onGround.seating.assign({
+        const seated = unwrap(await onGround.seating.assign({
           tripRef: onGroundTripRef,
           travellerId: kabir,
           vehicleId: fleet.flightId,
           seatLabel: '1A',
-        });
+        }));
         assertEquals(seated.data.seatLabel, '1A', 'the flight assignment did not carry the requested seat');
         console.log(`  Kabir Rao → flight, seatLabel=1A`);
 
         const meera = travellerIdByName(seatingRosterRows, 'Meera Singh', 'step 26');
-        const pending = await onGround.seating.assign({
+        const pending = unwrap(await onGround.seating.assign({
           tripRef: onGroundTripRef,
           travellerId: meera,
           vehicleId: fleet.flightId,
           // `seatLabel` omitted entirely — not `null` — "don't touch the seat".
-        });
+        }));
         assertEquals(pending.data.vehicleId, fleet.flightId, 'the pending traveller did not land on the flight');
         assertEquals(pending.data.seatLabel, null, 'a first assignment with no seatLabel produced one anyway');
         console.log('  Meera Singh → flight, seatLabel=null — "seat pending", not an error to repair');
 
-        const board = await onGround.seating.board({ tripRef: onGroundTripRef });
+        const board = unwrap(await onGround.seating.read({ tripRef: onGroundTripRef }));
         assertTrue(board.data.summary.seatPendingCount >= 1, 'the board did not count the seat-pending traveller');
         console.log(`  board.summary.seatPendingCount=${String(board.data.summary.seatPendingCount)}`);
       },
@@ -1804,25 +1908,25 @@ async function main(): Promise<void> {
       'seating: auto-assign dryRun then apply — byte-identical, and no noop while a FLIGHT exists',
       async () => {
         const rules = { genderAdjacency: 'AVOID_UNRELATED' as const };
-        const preview = await onGround.seating.autoAssign({
+        const preview = unwrap(await onGround.seating.autoAssign({
           tripRef: onGroundTripRef,
           dryRun: true,
           rules,
-        });
+        }));
         assertEquals(preview.data.dryRun, true, 'the preview did not report itself as a dry run');
         assertTrue(preview.data.plan.length > 0, 'the preview planned nobody');
 
-        const between = await onGround.seating.board({ tripRef: onGroundTripRef });
+        const between = unwrap(await onGround.seating.read({ tripRef: onGroundTripRef }));
         const busBefore = (between.data.vehicles.filter(
           (row): row is Vehicle => !isTombstone(row),
         ) as Vehicle[]).find((v) => v.id === fleet.busId);
         assertEquals(busBefore?.occupants.length, 1, 'the dry run wrote to the board (bus occupant count moved)');
 
-        const apply = await onGround.seating.autoAssign({
+        const apply = unwrap(await onGround.seating.autoAssign({
           tripRef: onGroundTripRef,
           dryRun: false,
           rules,
-        });
+        }));
         assertEquals(apply.data.dryRun, false, 'the apply reported itself as a dry run');
 
         assertJsonEquals(apply.data.plan, preview.data.plan, 'the applied seating plan differs from the preview');
@@ -1864,19 +1968,19 @@ async function main(): Promise<void> {
       28,
       'seating: a road-only fleet reports noop/no_seat_map for medicalFirst and gender',
       async () => {
-        const roadBus = await onGround.seating.createVehicle({
+        const roadBus = unwrap(await onGround.seating.vehicles.create({
           tripRef: altTripRef,
           regNo: `DL-BUS-${runSuffix}`,
           type: 'BUS',
           capacity: 20,
-        });
+        }));
         assertEquals(roadBus.data.seatMapped, false, 'the road-only fixture bus unexpectedly carries a grid');
 
-        const preview = await onGround.seating.autoAssign({
+        const preview = unwrap(await onGround.seating.autoAssign({
           tripRef: altTripRef,
           dryRun: true,
           rules: { genderAdjacency: 'AVOID_UNRELATED' },
-        });
+        }));
 
         const byRule = new Map(preview.data.perRule.map((r) => [r.rule, r] as const));
         const medical = byRule.get('medicalFirst');
@@ -1892,7 +1996,7 @@ async function main(): Promise<void> {
     );
     passed++;
 
-    const altRoster = (await onGround.seating.board({ tripRef: altTripRef })).data.unassignedPool;
+    const altRoster = (unwrap(await onGround.seating.read({ tripRef: altTripRef }))).data.unassignedPool;
 
     // -------------------------------------------------------------------
     // Step 29 — pickups, TRIP policy: a hard block. Every PENDING traveller
@@ -1906,38 +2010,38 @@ async function main(): Promise<void> {
       29,
       'pickups: TRIP policy — close refuses a PENDING traveller, then succeeds once resolved',
       async () => {
-        const stop = await onGround.pickups.createStop({
+        const stop = unwrap(await onGround.pickups.create({
           tripRef: altTripRef,
           name: 'Connaught Place',
           scheduledTime: new Date(Date.now() + 30 * 60_000).toISOString(),
-        });
+        }));
 
         const priya = travellerIdByName(altRoster, 'Priya Kapoor', 'step 29');
         const qadir = travellerIdByName(altRoster, 'Qadir Sheikh', 'step 29');
         const ritu = travellerIdByName(altRoster, 'Ritu Bose', 'step 29');
 
         for (const travellerId of [priya, qadir, ritu]) {
-          await onGround.pickups.assignTraveller({ tripRef: altTripRef, pointId: stop.data.id, travellerId });
+          unwrap(await onGround.pickups.assign({ tripRef: altTripRef, pointId: stop.data.id, travellerId }));
         }
-        await onGround.pickups.boardTraveller({
+        unwrap(await onGround.pickups.board({
           tripRef: altTripRef,
           pointId: stop.data.id,
           travellerId: priya,
           status: 'BOARDED',
-        });
-        await onGround.pickups.boardTraveller({
+        }));
+        unwrap(await onGround.pickups.board({
           tripRef: altTripRef,
           pointId: stop.data.id,
           travellerId: qadir,
           status: 'BOARDED',
-        });
+        }));
         // ritu stays PENDING.
 
         try {
-          await onGround.pickups.closeStop({ tripRef: altTripRef, pointId: stop.data.id });
+          unwrap(await onGround.pickups.close({ tripRef: altTripRef, pointId: stop.data.id }));
           throw new AssertionFailure('a TRIP-policy close succeeded with a PENDING traveller left');
         } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) throw err;
+          if (!(err instanceof KaafilApiError)) throw err;
           assertEquals(err.status, 422, 'a TRIP close with a PENDING traveller should be a 422');
           assertEquals(err.code, 'STOP_HAS_PENDING', 'the refusal should be STOP_HAS_PENDING');
           assertEquals(
@@ -1950,11 +2054,11 @@ async function main(): Promise<void> {
           );
         }
 
-        const closed = await onGround.pickups.closeStop({
+        const closed = unwrap(await onGround.pickups.close({
           tripRef: altTripRef,
           pointId: stop.data.id,
           resolutions: [{ travellerId: ritu, status: 'NO_SHOW' }],
-        });
+        }));
         assertEquals(closed.data.stop.status, 'CLOSED', 'the stop did not close once every PENDING was resolved');
         assertEquals(closed.data.boardedCount, 2, 'the closed stop reported the wrong boarded count');
         assertEquals(closed.data.noShowCount, 1, 'the closed stop reported the wrong no-show count');
@@ -1977,38 +2081,38 @@ async function main(): Promise<void> {
       30,
       'pickups: TREK policy — a short close needs confirm, then auto-resolves the remainder to NO_SHOW',
       async () => {
-        const stop = await onGround.pickups.createStop({
+        const stop = unwrap(await onGround.pickups.create({
           tripRef: onGroundTripRef,
           name: 'Trailhead Camp',
           scheduledTime: new Date(Date.now() + 45 * 60_000).toISOString(),
-        });
+        }));
 
         const devi = travellerIdByName(seatingRosterRows, 'Devi Patel', 'step 30');
         const farhan = travellerIdByName(seatingRosterRows, 'Farhan Ali', 'step 30');
         const gopal = travellerIdByName(seatingRosterRows, 'Gopal Rao', 'step 30');
 
         for (const travellerId of [devi, farhan, gopal]) {
-          await onGround.pickups.assignTraveller({ tripRef: onGroundTripRef, pointId: stop.data.id, travellerId });
+          unwrap(await onGround.pickups.assign({ tripRef: onGroundTripRef, pointId: stop.data.id, travellerId }));
         }
-        await onGround.pickups.boardTraveller({
+        unwrap(await onGround.pickups.board({
           tripRef: onGroundTripRef,
           pointId: stop.data.id,
           travellerId: devi,
           status: 'BOARDED',
-        });
-        await onGround.pickups.boardTraveller({
+        }));
+        unwrap(await onGround.pickups.board({
           tripRef: onGroundTripRef,
           pointId: stop.data.id,
           travellerId: farhan,
           status: 'BOARDED',
-        });
+        }));
         // gopal stays PENDING — 2 boarded of 3 expected: a short close.
 
         try {
-          await onGround.pickups.closeStop({ tripRef: onGroundTripRef, pointId: stop.data.id });
+          unwrap(await onGround.pickups.close({ tripRef: onGroundTripRef, pointId: stop.data.id }));
           throw new AssertionFailure('a short TREK close succeeded without confirm');
         } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) throw err;
+          if (!(err instanceof KaafilApiError)) throw err;
           assertEquals(err.status, 422, 'a short TREK close without confirm should be a 422');
           assertEquals(err.code, 'STOP_HAS_PENDING', 'the refusal should be the SAME code as the TRIP policy');
           assertEquals(
@@ -2019,12 +2123,12 @@ async function main(): Promise<void> {
           console.log('  close refused: 422 STOP_HAS_PENDING, requiresConfirm=true — show the confirm sheet');
         }
 
-        const closed = await onGround.pickups.closeStop({
+        const closed = unwrap(await onGround.pickups.close({
           tripRef: onGroundTripRef,
           pointId: stop.data.id,
           confirm: true,
           confirmedHeadCount: 2,
-        });
+        }));
         assertEquals(closed.data.stop.status, 'CLOSED', 'the confirmed short close did not close the stop');
         assertEquals(closed.data.boardedCount, 2, 'the confirmed close reported the wrong boarded count');
         assertEquals(
@@ -2052,20 +2156,20 @@ async function main(): Promise<void> {
       31,
       "postpone the trek via the 'active' sentinel — itinerary and stay windows shift, pickup times do not",
       async () => {
-        const beforeItinerary = await onGround.itinerary.read({ tripRef: onGroundTripRef });
-        const beforeWindows = await onGround.rooming.listStayWindows({ tripRef: onGroundTripRef });
-        const beforePickups = await onGround.pickups.listStops({ tripRef: onGroundTripRef });
+        const beforeItinerary = unwrap(await onGround.itinerary.read({ tripRef: onGroundTripRef }));
+        const beforeWindows = unwrap(await onGround.rooming.stayWindows.list({ tripRef: onGroundTripRef }));
+        const beforePickups = unwrap(await onGround.pickups.list({ tripRef: onGroundTripRef }));
 
         const oldStart = Date.parse(beforeItinerary.data.trip.startDate);
         const newStart = new Date(oldStart + 3 * day);
         const newEnd = new Date(Date.parse(beforeItinerary.data.trip.endDate) + 3 * day);
 
-        const result = await onGround.treks.postpone({
+        const result = unwrap(await onGround.treks.postpone({
           trekRef: 'active',
           newStartDate: newStart.toISOString(),
           newEndDate: newEnd.toISOString(),
           reason: 'Landslide warning on the approach road',
-        });
+        }));
         assertEquals(result.data.status, 'POSTPONED', 'the trip did not report POSTPONED after the postpone');
         assertTrue(result.data.ripple.dayDelta > 0, 'the ripple reported no forward day delta');
         assertTrue(result.data.ripple.itineraryDaysShifted > 0, 'no itinerary day was reported shifted');
@@ -2077,7 +2181,7 @@ async function main(): Promise<void> {
             `stayWindowsShifted=${String(result.data.ripple.stayWindowsShifted)}`,
         );
 
-        const afterItinerary = await onGround.itinerary.read({ tripRef: onGroundTripRef });
+        const afterItinerary = unwrap(await onGround.itinerary.read({ tripRef: onGroundTripRef }));
         assertEquals(
           afterItinerary.data.days.length,
           beforeItinerary.data.days.length,
@@ -2095,10 +2199,12 @@ async function main(): Promise<void> {
           );
         });
 
-        const afterWindows = await onGround.rooming.listStayWindows({ tripRef: onGroundTripRef });
-        assertEquals(afterWindows.data.length, beforeWindows.data.length, 'a stay window appeared or vanished');
-        const beforeWindow = beforeWindows.data[0];
-        const afterWindow = afterWindows.data[0];
+        const afterWindows = unwrap(await onGround.rooming.stayWindows.list({ tripRef: onGroundTripRef }));
+        const beforeLive = liveStayWindows([...beforeWindows.data]);
+        const afterLive = liveStayWindows([...afterWindows.data]);
+        assertEquals(afterLive.length, beforeLive.length, 'a stay window appeared or vanished');
+        const beforeWindow = beforeLive[0];
+        const afterWindow = afterLive[0];
         if (beforeWindow === undefined || afterWindow === undefined) {
           throw new AssertionFailure('step 31: unreachable — the stay window from step 18 is gone');
         }
@@ -2113,10 +2219,12 @@ async function main(): Promise<void> {
         // The explicit non-action: pickup scheduledTime is untouched. This is
         // asserted, not merely left unmentioned — an omission and a fact
         // read the same on a diff, and only one of them is safe to rely on.
-        const afterPickups = await onGround.pickups.listStops({ tripRef: onGroundTripRef });
-        assertEquals(afterPickups.data.length, beforePickups.data.length, 'a pickup stop appeared or vanished');
-        for (const before of beforePickups.data) {
-          const after = afterPickups.data.find((row) => row.id === before.id);
+        const afterPickups = unwrap(await onGround.pickups.list({ tripRef: onGroundTripRef }));
+        const afterStops = livePickupStops([...afterPickups.data]);
+        const beforeStops = livePickupStops([...beforePickups.data]);
+        assertEquals(afterStops.length, beforeStops.length, 'a pickup stop appeared or vanished');
+        for (const before of beforeStops) {
+          const after = afterStops.find((row) => row.id === before.id);
           if (after === undefined) {
             throw new AssertionFailure(`step 31: pickup stop ${before.id} is missing after the postpone`);
           }
@@ -2127,7 +2235,7 @@ async function main(): Promise<void> {
           );
         }
         console.log(
-          `  ${String(afterPickups.data.length)} pickup stop(s): scheduledTime unchanged on every one — ` +
+          `  ${String(afterStops.length)} pickup stop(s): scheduledTime unchanged on every one — ` +
             're-confirmed by a manager, not carried by the ripple',
         );
       },
@@ -2158,10 +2266,10 @@ async function main(): Promise<void> {
       'treks: a wrong-KIND trip answers 422 NOT_A_TREK, not a generic 422 with a details string',
       async () => {
         try {
-          await onGround.treks.board({ trekRef: altExternalTripId });
+          unwrap(await onGround.treks.board({ trekRef: altExternalTripId }));
           throw new AssertionFailure('a treks endpoint answered for an eventType=TRIP trip');
         } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) throw err;
+          if (!(err instanceof KaafilApiError)) throw err;
           assertEquals(err.status, 422, 'a treks call on a TRIP trip should be a 422');
           assertEquals(err.code, 'NOT_A_TREK', 'the refusal should carry the module-local NOT_A_TREK code');
           assertTrue(
@@ -2175,7 +2283,7 @@ async function main(): Promise<void> {
         }
 
         // The positive control: the SAME endpoint on the real trek succeeds.
-        const board = await onGround.treks.board({ trekRef: 'active' });
+        const board = unwrap(await onGround.treks.board({ trekRef: 'active' }));
         assertEquals(board.data.emptyState, null, 'the manager\'s active trek board reported emptyState');
         assertTrue(board.data.externalTripId !== null, 'the active trek board resolved to no trip');
         console.log(`  treks.board({trekRef:'active'}) on the real trek → phase=${String(board.data.phase)}`);
@@ -2261,7 +2369,7 @@ async function main(): Promise<void> {
       34,
       'checklist read on a brand-new trip — the four reserved sections were seeded AT INGEST, not by this read',
       async () => {
-        const { data } = await onGround.checklists.read({ tripRef: checklistTripRef });
+        const { data } = unwrap(await onGround.checklists.read({ tripRef: checklistTripRef }));
 
         assertEquals(data.sections.length, 4, 'a freshly-ingested trip did not carry exactly four sections');
         const keysPresent = new Set(data.sections.map((section) => section.key));
@@ -2314,24 +2422,24 @@ async function main(): Promise<void> {
       35,
       'add two items into the seeded "documents" section — gate derives from the section\'s own phase',
       async () => {
-        const passport = await onGround.checklists.items.add({
+        const passport = unwrap(await onGround.checklists.items.add({
           tripRef: checklistTripRef,
           sectionKey: 'documents',
           phase: documentsSection.phase,
           title: 'Passport copy submitted',
           mandatory: true,
-        });
+        }));
         assertEquals(passport.data.gate, 'PRE_TO_ACTIVE', 'a PRE_DEPARTURE section did not derive PRE_TO_ACTIVE');
         assertEquals(passport.data.sortOrder, 0, 'the first item into an empty section was not at sortOrder 0');
         assertEquals(passport.data.status, 'OPEN', 'a freshly-added item was not OPEN');
 
-        const insurance = await onGround.checklists.items.add({
+        const insurance = unwrap(await onGround.checklists.items.add({
           tripRef: checklistTripRef,
           sectionKey: 'documents',
           phase: documentsSection.phase,
           title: 'Insurance certificate',
           mandatory: false,
-        });
+        }));
         assertEquals(insurance.data.sortOrder, 1, 'the second item did not append at the section\'s tail');
         assertEquals(insurance.data.sectionId, passport.data.sectionId, 'the two items landed in different sections');
 
@@ -2357,15 +2465,15 @@ async function main(): Promise<void> {
       'toggle: a STALE expectedStatus is refused 409 with details.currentStatus, then the correct value succeeds',
       async () => {
         try {
-          await onGround.checklists.items.toggle({
+          unwrap(await onGround.checklists.items.toggle({
             tripRef: checklistTripRef,
             itemId: checklistItems.passport.id,
             // The item is actually OPEN — this claims it is already COMPLETE.
             expectedStatus: 'COMPLETE',
-          });
+          }));
           throw new AssertionFailure('a stale expectedStatus was accepted');
         } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) throw err;
+          if (!(err instanceof KaafilApiError)) throw err;
           assertEquals(err.status, 409, 'a stale expectedStatus should be a 409');
           assertEquals(err.code, 'CONFLICT_VERSION', 'the refusal should be CONFLICT_VERSION');
           assertEquals(
@@ -2379,11 +2487,11 @@ async function main(): Promise<void> {
           );
         }
 
-        const toggled = await onGround.checklists.items.toggle({
+        const toggled = unwrap(await onGround.checklists.items.toggle({
           tripRef: checklistTripRef,
           itemId: checklistItems.passport.id,
           expectedStatus: 'OPEN',
-        });
+        }));
         assertEquals(toggled.data.item.status, 'COMPLETE', 'the correct expectedStatus did not flip the item');
         assertTrue(toggled.data.item.completedByManagerId !== null, 'a completed item carries no completedByManagerId');
         assertEquals(toggled.data.sectionProgress.complete, 1, 'the section progress did not count the completion');
@@ -2402,14 +2510,14 @@ async function main(): Promise<void> {
 
     await step(37, 'a COMPLETE item refuses delete; the still-OPEN sibling deletes cleanly', async () => {
       try {
-        await onGround.checklists.items.remove({
+        unwrap(await onGround.checklists.items.remove({
           tripRef: checklistTripRef,
           itemId: toggledPassport.id,
-          ifMatch: toggledPassport.version,
-        });
+          version: toggledPassport.version,
+        }));
         throw new AssertionFailure('a COMPLETE item was deleted');
       } catch (err) {
-        if (!(err instanceof OnGroundHttpError)) throw err;
+        if (!(err instanceof KaafilApiError)) throw err;
         assertEquals(err.status, 422, 'deleting a COMPLETE item should be a 422');
         assertEquals(err.code, 'BUSINESS_RULE_VIOLATION', 'the refusal should be BUSINESS_RULE_VIOLATION');
         assertEquals(
@@ -2420,11 +2528,11 @@ async function main(): Promise<void> {
         console.log('  DELETE on a COMPLETE item → 422 BUSINESS_RULE_VIOLATION (item_complete_delete_blocked)');
       }
 
-      const deleted = await onGround.checklists.items.remove({
+      const deleted = unwrap(await onGround.checklists.items.remove({
         tripRef: checklistTripRef,
         itemId: checklistItems.insurance.id,
-        ifMatch: checklistItems.insurance.version,
-      });
+        version: checklistItems.insurance.version,
+      }));
       assertEquals(deleted.data.deleted, true, 'the still-OPEN item did not delete');
       console.log(`  DELETE on the still-OPEN "${checklistItems.insurance.title}" → succeeded`);
     });
@@ -2450,7 +2558,7 @@ async function main(): Promise<void> {
       38,
       'the agency template library is empty (no admin route creates one yet) — pull-template still refuses correctly',
       async () => {
-        const templates = await onGround.checklists.templates.list({ tripRef: checklistTripRef });
+        const templates = unwrap(await onGround.checklists.templates.list({ tripRef: checklistTripRef }));
         assertEquals(
           templates.data.templates.length,
           0,
@@ -2459,14 +2567,14 @@ async function main(): Promise<void> {
         console.log('  checklist.templates.list → 0 templates (no admin route exists to create one — a real gap, see README)');
 
         try {
-          await onGround.checklists.templates.pull({
+          unwrap(await onGround.checklists.templates.pull({
             tripRef: checklistTripRef,
             templateSectionId: `no-such-template-${runSuffix}`,
             mode: 'append',
-          });
+          }));
           throw new AssertionFailure('pull-template succeeded against an id that cannot exist');
         } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) throw err;
+          if (!(err instanceof KaafilApiError)) throw err;
           assertEquals(err.status, 404, 'pulling a nonexistent template should be a 404');
           assertEquals(err.code, 'RESOURCE_NOT_FOUND', 'the refusal should be RESOURCE_NOT_FOUND');
           console.log('  pull-template on a nonexistent id → 404 RESOURCE_NOT_FOUND — the operation is real and gated');
@@ -2486,20 +2594,20 @@ async function main(): Promise<void> {
       39,
       'PATCH phase alone re-derives gate; PATCH phase AND an explicit gate together — the explicit value wins',
       async () => {
-        const logisticsItem = await onGround.checklists.items.add({
+        const logisticsItem = unwrap(await onGround.checklists.items.add({
           tripRef: checklistTripRef,
           sectionKey: 'logistics',
           phase: 'IN_TRIP',
           title: 'Confirm porter headcount',
-        });
+        }));
         assertEquals(logisticsItem.data.gate, 'NONE', 'an IN_TRIP section did not derive gate NONE');
 
-        const rederived = await onGround.checklists.items.patch({
+        const rederived = unwrap(await onGround.checklists.items.patch({
           tripRef: checklistTripRef,
           itemId: logisticsItem.data.id,
-          ifMatch: logisticsItem.data.version,
-          patch: { phase: 'POST_TRIP' },
-        });
+          version: logisticsItem.data.version,
+          phase: 'POST_TRIP',
+        }));
         assertEquals(
           rederived.data.gate,
           'ACTIVE_TO_CLOSED_OUT',
@@ -2507,12 +2615,12 @@ async function main(): Promise<void> {
         );
         console.log(`  PATCH {phase:POST_TRIP} alone → gate re-derived to ${rederived.data.gate}`);
 
-        const explicitWins = await onGround.checklists.items.patch({
+        const explicitWins = unwrap(await onGround.checklists.items.patch({
           tripRef: checklistTripRef,
           itemId: logisticsItem.data.id,
-          ifMatch: rederived.data.version,
-          patch: { phase: 'IN_TRIP', gate: 'PRE_TO_ACTIVE' },
-        });
+          version: rederived.data.version,
+          phase: 'IN_TRIP', gate: 'PRE_TO_ACTIVE',
+        }));
         assertEquals(
           explicitWins.data.gate,
           'PRE_TO_ACTIVE',
@@ -2599,12 +2707,12 @@ async function main(): Promise<void> {
       41,
       'float: issue ₹4,000.00 to the manager — the derived balance starts from zero',
       async () => {
-        const issued = await onGround.float.issue({
+        const issued = unwrap(await onGround.float.issue({
           tripRef: onGroundTripRef,
           managerId: managerRef,
           amountMinor: floatIssueAmountMinor,
           note: 'Cash handed over at the office before departure',
-        });
+        }));
         assertEquals(issued.data.type, 'ISSUE', 'the movement was not typed ISSUE');
         assertEquals(issued.data.direction, 'IN', 'an ISSUE must be direction IN');
         assertEquals(issued.data.balanceBeforeMinor, 0, 'a first-ever movement did not start from a zero balance');
@@ -2614,7 +2722,7 @@ async function main(): Promise<void> {
           'the balance after issuing did not equal the amount issued',
         );
 
-        const summary = await onGround.float.readSummary({ tripRef: onGroundTripRef });
+        const summary = unwrap(await onGround.float.readSummary({ tripRef: onGroundTripRef }));
         const row = summary.data.data.find((r) => r.managerId === managerRef);
         if (row === undefined) {
           throw new AssertionFailure('step 41: the manager has no row in the float summary right after issuing');
@@ -2644,25 +2752,25 @@ async function main(): Promise<void> {
       42,
       'expenses: log a FLOAT_CASH expense, then REPLAY the same Idempotency-Key — exactly ONE movement, not two',
       async () => {
-        const first = await onGround.expenses.log({
+        const first = unwrap(await onGround.expenses.log({
           tripRef: onGroundTripRef,
           amountMinor: lunchAmountMinor,
           category: 'FOOD',
           paymentMode: 'FLOAT_CASH',
           description: 'Lunch for the group at the dhaba',
           idempotencyKey: lunchIdempotencyKey,
-        });
+        }));
         assertTrue(first.data.floatMovementId !== null, 'a FLOAT_CASH log did not couple to a float movement');
         assertEquals(first.data.missingReceipt, true, 'a fresh log with no receipt did not read missingReceipt');
 
-        const replay = await onGround.expenses.log({
+        const replay = unwrap(await onGround.expenses.log({
           tripRef: onGroundTripRef,
           amountMinor: lunchAmountMinor,
           category: 'FOOD',
           paymentMode: 'FLOAT_CASH',
           description: 'Lunch for the group at the dhaba',
           idempotencyKey: lunchIdempotencyKey,
-        });
+        }));
         assertEquals(replay.data.id, first.data.id, 'the replay minted a SECOND Expense row');
         assertEquals(
           replay.data.floatMovementId,
@@ -2670,7 +2778,7 @@ async function main(): Promise<void> {
           'the replay coupled to a SECOND FloatMovement row',
         );
 
-        const summary = await onGround.float.readSummary({ tripRef: onGroundTripRef });
+        const summary = unwrap(await onGround.float.readSummary({ tripRef: onGroundTripRef }));
         const row = summary.data.data.find((r) => r.managerId === managerRef);
         if (row === undefined) {
           throw new AssertionFailure('step 42: the manager vanished from the float summary');
@@ -2682,7 +2790,7 @@ async function main(): Promise<void> {
           'the derived balance did not reflect exactly one EXPENSE(OUT) movement',
         );
 
-        const ledger = await onGround.float.readLedger({ tripRef: onGroundTripRef, managerId: managerRef });
+        const ledger = unwrap(await onGround.float.readLedger({ tripRef: onGroundTripRef, managerId: managerRef }));
         const expenseMovements = ledger.data.data.filter((m) => m.type === 'EXPENSE');
         assertEquals(expenseMovements.length, 1, 'the ledger carries more than one EXPENSE movement for one logged lunch');
 
@@ -2714,12 +2822,12 @@ async function main(): Promise<void> {
       43,
       'files: the REAL presigned flow — POST /files, PUT the bytes, confirm, then link to the expense',
       async () => {
-        const slot = await onGround.files.requestUpload({
+        const slot = unwrap(await onGround.files.request({
           purpose: 'expense_receipt',
           tripRef: onGroundTripRef,
           contentType: 'image/jpeg',
           sizeBytes: receiptBytes.byteLength,
-        });
+        }));
         assertTrue(slot.data.uploadUrl.length > 0, 'the upload slot carried no uploadUrl');
         console.log(`  fileId=${slot.data.fileId} — presigned PUT minted, 900s window`);
 
@@ -2729,16 +2837,21 @@ async function main(): Promise<void> {
         await putPresignedBytes(slot.data.uploadUrl, receiptBytes, 'image/jpeg');
         console.log('  PUT of the actual bytes → object storage accepted them');
 
-        const confirmed = await onGround.files.confirm({ fileId: slot.data.fileId });
+        const confirmed = unwrap(await onGround.files.confirm({ fileId: slot.data.fileId }));
         assertEquals(confirmed.data.status, 'ready', 'confirm did not flip the file to ready');
         assertEquals(confirmed.data.retentionClass, 'FINANCIAL', 'an expense_receipt did not derive retentionClass FINANCIAL');
         console.log(`  confirm → status=${confirmed.data.status} retentionClass=${String(confirmed.data.retentionClass)}`);
 
-        const linked = await onGround.expenses.linkReceipt({
+        // `idempotencyKey` is REQUIRED here and optional on every other write
+        // in the SDK. That asymmetry is deliberate and worth not papering over:
+        // linking a receipt is the one write whose retry could otherwise attach
+        // a second copy of the same file to the same expense.
+        const linked = unwrap(await onGround.expenses.linkReceipt({
           tripRef: onGroundTripRef,
-          id: lunchExpense.id,
+          expenseId: lunchExpense.id,
           receiptFileKey: slot.data.fileId,
-        });
+          idempotencyKey: `link-receipt-${lunchExpense.id}`,
+        }));
         assertEquals(linked.data.receiptFileKey, slot.data.fileId, 'the expense did not link the confirmed file');
         assertEquals(linked.data.missingReceipt, false, 'a linked receipt did not clear missingReceipt');
         console.log(`  linked to expense ${lunchExpense.id} → missingReceipt=${String(linked.data.missingReceipt)}`);
@@ -2757,15 +2870,15 @@ async function main(): Promise<void> {
       44,
       'void the expense — the float ledger nets back to exactly where it started, before this expense existed',
       async () => {
-        const voided = await onGround.expenses.void({
+        const voided = unwrap(await onGround.expenses.void({
           tripRef: onGroundTripRef,
-          id: lunchExpense.id,
-          ifMatch: lunchExpense.version,
+          expenseId: lunchExpense.id,
+          version: lunchExpense.version,
           reason: 'Mistyped amount — re-entering correct figure separately',
-        });
+        }));
         assertTrue(voided.data.voidedAt !== null, 'the expense did not carry a voidedAt after voiding');
 
-        const summary = await onGround.float.readSummary({ tripRef: onGroundTripRef });
+        const summary = unwrap(await onGround.float.readSummary({ tripRef: onGroundTripRef }));
         const row = summary.data.data.find((r) => r.managerId === managerRef);
         if (row === undefined) {
           throw new AssertionFailure('step 44: the manager vanished from the float summary');
@@ -2848,7 +2961,7 @@ async function main(): Promise<void> {
         // carries the internal id keyed against an outstanding balance. This
         // is the first balance ever pushed on this trip, so the eligible
         // list must carry EXACTLY the one row this step just created.
-        const eligible = await onGround.collections.listEligible({ tripRef: onGroundTripRef });
+        const eligible = unwrap(await onGround.collections.eligible({ tripRef: onGroundTripRef }));
         assertEquals(eligible.data.length, 1, 'the eligible list did not carry exactly the one balance just pushed');
         const eligibleRow = eligible.data[0];
         if (eligibleRow === undefined) {
@@ -2858,13 +2971,13 @@ async function main(): Promise<void> {
         const travellerId = eligibleRow.travellerId;
 
         const partialAmountMinor = 4_000_00; // ₹4,000.00 of the ₹6,000.00 owed
-        const recorded = await onGround.collections.record({
+        const recorded = unwrap(await onGround.collections.record({
           tripRef: onGroundTripRef,
           travellerId,
           amountMinor: partialAmountMinor,
           mode: 'UPI',
           reference: `UPI-SIM-${runSuffix}`,
-        });
+        }));
         assertEquals(recorded.data.amountMinor, partialAmountMinor, 'the recorded collection echoed the wrong amount');
         assertEquals(
           recorded.data.outstandingMinor,
@@ -2875,15 +2988,15 @@ async function main(): Promise<void> {
         console.log(`  collected ₹${String(partialAmountMinor / 100)} of ₹${String(balanceDueMinor / 100)} owed → remaining ₹${String(remainingMinor / 100)}`);
 
         try {
-          await onGround.collections.record({
+          unwrap(await onGround.collections.record({
             tripRef: onGroundTripRef,
             travellerId,
             amountMinor: remainingMinor + 1_00, // one rupee more than is actually left
             mode: 'CASH',
-          });
+          }));
           throw new AssertionFailure('an overpaying collection was accepted');
         } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) throw err;
+          if (!(err instanceof KaafilApiError)) throw err;
           assertEquals(err.status, 422, 'an overpay should be a 422');
           assertEquals(err.code, 'BUSINESS_RULE_VIOLATION', 'an overpay should be BUSINESS_RULE_VIOLATION');
           assertEquals(
@@ -2911,7 +3024,7 @@ async function main(): Promise<void> {
       46,
       'float: an over-return refuses with details.currentBalanceMinor — the negative-float guard',
       async () => {
-        const summaryBefore = await onGround.float.readSummary({ tripRef: onGroundTripRef });
+        const summaryBefore = unwrap(await onGround.float.readSummary({ tripRef: onGroundTripRef }));
         const rowBefore = summaryBefore.data.data.find((r) => r.managerId === managerRef);
         if (rowBefore === undefined) {
           throw new AssertionFailure('step 46: the manager has no float row to over-return against');
@@ -2919,15 +3032,15 @@ async function main(): Promise<void> {
         const currentBalanceMinor = rowBefore.balanceMinor;
 
         try {
-          await onGround.float.return({
+          unwrap(await onGround.float.return({
             tripRef: onGroundTripRef,
             managerId: managerRef,
             amountMinor: currentBalanceMinor + 1_00, // one rupee more than the manager actually holds
             note: 'Attempting to return more than is left',
-          });
+          }));
           throw new AssertionFailure('an over-return of float was accepted');
         } catch (err) {
-          if (!(err instanceof OnGroundHttpError)) throw err;
+          if (!(err instanceof KaafilApiError)) throw err;
           assertEquals(err.status, 422, 'an over-return should be a 422');
           assertEquals(err.code, 'BUSINESS_RULE_VIOLATION', 'an over-return should be BUSINESS_RULE_VIOLATION');
           assertEquals(
@@ -2943,12 +3056,12 @@ async function main(): Promise<void> {
 
         // The positive control: returning EXACTLY the current balance succeeds
         // and nets to zero — the guard is a boundary, not a blanket refusal.
-        const returned = await onGround.float.return({
+        const returned = unwrap(await onGround.float.return({
           tripRef: onGroundTripRef,
           managerId: managerRef,
           amountMinor: currentBalanceMinor,
           note: 'Leftover cash handed back at close-out',
-        });
+        }));
         assertEquals(returned.data.balanceAfterMinor, 0, 'returning exactly the current balance did not net to zero');
         console.log(`  returning exactly ₹${String(currentBalanceMinor / 100)} → balanceAfterMinor=0`);
       },
@@ -3014,23 +3127,23 @@ async function main(): Promise<void> {
       'claim a PERSONAL expense, ingest PAID, then replay with an EQUAL crmDecisionAt — RE-APPLIED, not an error',
       async () => {
         const idk = `sim-personal-${runSuffix}`;
-        const logged = await onGround.expenses.log({
+        const logged = unwrap(await onGround.expenses.log({
           tripRef: onGroundTripRef,
           amountMinor: 50_000, // ₹500.00
           category: 'MISC',
           paymentMode: 'PERSONAL',
           description: 'Personal taxi, claimed back',
           idempotencyKey: idk,
-        });
+        }));
         assertEquals(logged.data.paymentMode, 'PERSONAL', 'the logged expense was not PERSONAL');
 
         try {
-          const claimed = await onGround.expenses.submitClaim({ tripRef: onGroundTripRef, id: logged.data.id });
+          const claimed = unwrap(await onGround.expenses.claims.submit({ tripRef: onGroundTripRef, expenseId: logged.data.id }));
           assertEquals(claimed.data.claimStatus, 'SUBMITTED', 'submitting a claim did not set claimStatus SUBMITTED');
           console.log(`  claim submitted on expense ${logged.data.id}`);
         } catch (err) {
           if (
-            err instanceof OnGroundHttpError &&
+            err instanceof KaafilApiError &&
             err.status === 402 &&
             err.details?.['flag'] === 'expenses.claims'
           ) {
@@ -3091,6 +3204,381 @@ async function main(): Promise<void> {
       },
     ));
 
+
+    // -------------------------------------------------------------------
+    // Steps 48-53 — CLOSING DAY. Blockers -> handover -> lock -> 423.
+    //
+    // These five operations shipped in the contract well before any client
+    // could reach them: `closeout.*` is `managerAuth` (except `unlock`), and
+    // `KaafilClient` wired neither. `kaafil-js@0.1.0-beta.3` wires
+    // `client.closeout`, which is what makes this section possible at all —
+    // GAPS.md's `closing-day-unbuilt` closed here.
+    //
+    // The section is deliberately ordered as a REFUSAL first. A close-out that
+    // only ever demonstrates the happy lock proves nothing about the gate: the
+    // whole point of `canLock`/`lockDisabledReason` is that the server owns the
+    // verdict, and the only way to show a server owns a verdict is to make it
+    // say no.
+    // -------------------------------------------------------------------
+
+    const closeoutBefore = await step(
+      48,
+      'closeout.get — canLock and lockDisabledReason are the SERVER\'s verdict, re-derived on read',
+      async () => {
+        const { data } = unwrap(await onGround.closeout.get({ tripRef: onGroundTripRef }));
+
+        // `stage` is null until the trip has returned, and this run's trip has
+        // not. That is asserted rather than skipped: a client that treats null
+        // as "unknown, try anyway" and enables its lock button is exactly the
+        // bug `canLock` exists to prevent.
+        assertTrue(
+          typeof data.canLock === 'boolean',
+          'closeout.get did not answer a boolean canLock — the verdict is the server\'s, and it must always give one',
+        );
+        assertTrue(
+          Array.isArray(data.blockers),
+          'closeout.get did not answer a blockers array',
+        );
+        // The two-way tie between the verdict and its sentence. Either both say
+        // "you may not" or both say "you may" — a `canLock:false` with no
+        // reason leaves a UI with a disabled button and nothing to render next
+        // to it, which is the failure this asserts against.
+        if (data.canLock) {
+          assertEquals(data.lockDisabledReason, null, 'canLock is true but a lockDisabledReason came with it');
+        } else {
+          assertTrue(
+            typeof data.lockDisabledReason === 'string' && data.lockDisabledReason.length > 0,
+            'canLock is false and no lockDisabledReason came with it — a refusal with no sentence to show',
+          );
+        }
+        assertTrue(
+          typeof data.handover.version === 'number',
+          'the handover carries no version — there is nothing to guard the next save with',
+        );
+
+        console.log(`  stage=${String(data.stage)} canLock=${String(data.canLock)} blockers=${String(data.blockers.length)}`);
+        if (!data.canLock) console.log(`  lockDisabledReason: ${String(data.lockDisabledReason)}`);
+        return data;
+      },
+    );
+    passed++;
+
+    await step(
+      49,
+      'the blockers are a CLOSED inventory of eleven keys — every row names one of them',
+      async () => {
+        // The spec says the blocker key inventory is closed at eleven, and that
+        // a twelfth is a spec change rather than a release. That is a claim a
+        // consumer can actually rely on when it writes a switch over them, so
+        // it is worth a real check rather than a comment.
+        const KNOWN_BLOCKER_KEYS = new Set([
+          'balance_due',
+          'missing_receipt',
+          'float_not_returned',
+          'open_mandatory_checklist',
+          'required_form_gap',
+          'unassigned_rooming',
+          'unseated_travellers',
+          'pickup_no_show',
+          'reimbursements_pending',
+          'unrated_vendors',
+          'open_past_itinerary',
+        ]);
+        for (const blocker of closeoutBefore.blockers) {
+          assertTrue(
+            KNOWN_BLOCKER_KEYS.has(blocker.key),
+            `blocker key "${blocker.key}" is outside the closed inventory of eleven — a consumer switching on these would fall through`,
+          );
+        }
+        console.log(
+          closeoutBefore.blockers.length === 0
+            ? '  no blockers on this trip — the inventory check is vacuous here and says so'
+            : `  ${String(closeoutBefore.blockers.length)} blocker(s), all inside the closed inventory: ${closeoutBefore.blockers.map((b) => b.key).join(', ')}`,
+        );
+      },
+    );
+    passed++;
+
+    const handoverVersion = await step(
+      50,
+      'closeout.saveHandover is version-guarded — expectedVersion, and a stale one is refused 409',
+      async () => {
+        const note = `Closed by the walkthrough at ${new Date().toISOString()} (run ${runSuffix}).`;
+        const saved = unwrap(await onGround.closeout.saveHandover({
+          tripRef: onGroundTripRef,
+          handoverNote: note,
+          expectedVersion: closeoutBefore.handover.version,
+        }));
+        assertEquals(saved.data.handover.note, note, 'the handover note did not round-trip');
+        assertTrue(
+          saved.data.handover.version > closeoutBefore.handover.version,
+          'the handover version did not advance after a successful save',
+        );
+
+        // The guard itself, proved by using it wrong. Re-sending the version we
+        // just superseded is exactly what a second device holding a stale read
+        // would send, and it must lose rather than silently overwrite.
+        try {
+          unwrap(await onGround.closeout.saveHandover({
+            tripRef: onGroundTripRef,
+            handoverNote: 'a second device, holding a stale read',
+            expectedVersion: closeoutBefore.handover.version,
+          }));
+          throw new AssertionFailure('a STALE expectedVersion was accepted — the handover note is last-write-wins');
+        } catch (err) {
+          if (!(err instanceof KaafilApiError)) throw err;
+          assertEquals(err.status, 409, 'a stale expectedVersion should be a 409');
+          assertEquals(err.code, 'CONFLICT_VERSION', 'the stale-version refusal should be CONFLICT_VERSION');
+        }
+
+        console.log(`  handover saved, version ${String(closeoutBefore.handover.version)} → ${String(saved.data.handover.version)}`);
+        console.log('  a replayed STALE expectedVersion → 409 CONFLICT_VERSION (never a silent overwrite)');
+        return saved.data.handover.version;
+      },
+    );
+    passed++;
+
+    const lockOutcome = await step(
+      51,
+      'closeout.lock — refused 422 CARRYING the blockers while any stands, never a 200 with canLock:false',
+      async () => {
+        const { data: current } = unwrap(await onGround.closeout.get({ tripRef: onGroundTripRef }));
+
+        if (!current.canLock) {
+          // The refusal path. This is the one the section is really about, and
+          // the assertion is that the refusal and its reasons arrive TOGETHER:
+          // an integrator must never have to make a second call to find out why.
+          try {
+            unwrap(await onGround.closeout.lock({
+              tripRef: onGroundTripRef,
+              expectedVersion: handoverVersion,
+            }));
+            throw new AssertionFailure(
+              'closeout.lock succeeded while canLock was false — the gate and the lock disagree, which means one of them is decorative',
+            );
+          } catch (err) {
+            if (!(err instanceof KaafilApiError)) throw err;
+            assertTrue(
+              err.status === 422 || err.status === 409,
+              `a blocked lock should be 422 (or 409 on a stale version), got ${String(err.status)}`,
+            );
+            console.log(`  lock refused ${String(err.status)} ${String(err.code)} — ${err.message}`);
+            console.log(`  ${String(current.blockers.length)} blocker(s) still standing: ${current.blockers.map((b) => b.key).join(', ') || '(none reported)'}`);
+          }
+          return { locked: false as const };
+        }
+
+        const locked = unwrap(await onGround.closeout.lock({
+          tripRef: onGroundTripRef,
+          expectedVersion: handoverVersion,
+        }));
+        assertEquals(locked.data.stage, 'LOCKED', 'a successful lock did not put the trip on stage LOCKED');
+        assertTrue(locked.data.lockedAt !== null, 'a locked trip carries no lockedAt');
+        console.log(`  locked at ${String(locked.data.lockedAt)} — stage=${String(locked.data.stage)}`);
+        return { locked: true as const };
+      },
+    );
+    passed++;
+
+    await step(
+      52,
+      'after a lock, an ordinary on-ground write answers 423 LOCKED — and before one, it does not',
+      async () => {
+        // The control is what makes this worth asserting. Running the same
+        // write in both states is the difference between "the trip is locked"
+        // and "this write happens to fail" — and the SDK classifies 423 as
+        // fatal/park repo-wide, so a queued write would park rather than spin.
+        const probe = () =>
+          onGround.checklists.items.add({
+            tripRef: onGroundTripRef,
+            sectionKey: 'post_trip',
+            phase: 'POST_TRIP',
+            title: `lock probe ${runSuffix}`,
+          });
+
+        if (!lockOutcome.locked) {
+          const added = unwrap(await probe());
+          assertTrue(typeof added.data.id === 'string', 'the control write did not return an item');
+          console.log('  the trip is NOT locked, and the control write succeeded — 423 is a fact about the LOCK, not about this write');
+          return;
+        }
+
+        try {
+          unwrap(await probe());
+          throw new AssertionFailure('an on-ground write succeeded on a LOCKED trip');
+        } catch (err) {
+          if (!(err instanceof KaafilApiError)) throw err;
+          assertEquals(err.status, 423, 'a write on a locked trip should be 423');
+          assertEquals(err.code, 'LOCKED', 'the refusal on a locked trip should be code LOCKED');
+          console.log('  a checklist write on the locked trip → 423 LOCKED (parked by the SDK, never retried)');
+        }
+      },
+    );
+    passed++;
+
+    await step(
+      53,
+      'closeout.exportPdf returns BYTES and the server\'s own content-type — not an envelope',
+      async () => {
+        // `KaafilBinaryResponse` is `{ bytes, meta }` and deliberately NOT
+        // `KaafilResponse<T>`'s flattened `T & { meta }`, so `unwrap` is not
+        // used here. That distinction is the whole point of the assertion: a
+        // consumer that ran a PDF through an envelope-shaped helper would
+        // corrupt it, and the types are what stop that.
+        const pack = await onGround.closeout.exportPdf({ tripRef: onGroundTripRef });
+        assertTrue(pack.bytes instanceof Uint8Array, 'exportPdf did not answer a Uint8Array');
+        assertTrue(pack.bytes.byteLength > 0, 'exportPdf answered zero bytes');
+        assertEquals(
+          pack.meta.contentType,
+          'application/pdf',
+          'the export pack did not come back as application/pdf',
+        );
+        // The magic number, because a content-type header is a claim and the
+        // first five bytes are the evidence.
+        const magic = new TextDecoder().decode(pack.bytes.subarray(0, 5));
+        assertEquals(magic, '%PDF-', 'the bytes are labelled application/pdf but do not start with %PDF-');
+        console.log(`  ${String(pack.bytes.byteLength)} bytes, contentType=${pack.meta.contentType}, magic="${magic}"`);
+      },
+    );
+    passed++;
+
+    // -------------------------------------------------------------------
+    // Steps 54-56 — THE OFFLINE DRAIN. Queue while unreachable, restore,
+    // assert the batch landed.
+    //
+    // This is the section GAPS.md's `no-offline-outbox` was about, and the one
+    // thing this repo could not demonstrate at all before beta.3.
+    //
+    // "Unreachable" is produced HONESTLY: a second `KaafilClient` is opened
+    // against a base URL nothing is listening on, and the offline engine is
+    // built on THAT. Nothing here monkey-patches `fetch`, stubs a transport or
+    // simulates a failure — the requests genuinely do not arrive, which is the
+    // only way this proves the queue rather than proving a mock.
+    //
+    // The STORAGE is what carries the queue across the outage: the same
+    // adapter instance is handed to both engines, so the ops enqueued against
+    // the dead client are the ops the live one drains. That is the durability
+    // claim, made structurally rather than asserted about.
+    // -------------------------------------------------------------------
+
+    const OFFLINE_OPS = 6; // above the batch threshold of 5, on purpose
+
+    const offlineStorage = createInMemoryStorageAdapter();
+
+    await step(
+      54,
+      `queue ${String(OFFLINE_OPS)} writes while the engine is genuinely unreachable — nothing lands, nothing is lost`,
+      async () => {
+        // Port 1 is reserved and nothing binds it; this connection is refused
+        // immediately rather than hanging, which keeps the step fast without
+        // making the failure any less real.
+        const deadClient = new KaafilClient({ environment: 'test', baseUrl: 'http://127.0.0.1:1' });
+        deadClient.session.open({
+          accessToken: managerSession.accessToken,
+          refreshToken: managerSession.refreshToken,
+          expiresAt: managerSession.expiresAt,
+        });
+        const deadEngine = deadClient.openOffline({ storage: offlineStorage, scope: `sim-${runSuffix}` });
+        await deadEngine.open();
+
+        for (let i = 0; i < OFFLINE_OPS; i++) {
+          await deadEngine.enqueue({
+            tripRef: onGroundTripRef,
+            method: 'POST',
+            path: `/api/v1/trips/${encodeURIComponent(onGroundTripRef)}/expenses`,
+            operationId: 'logExpense',
+            body: {
+              amountMinor: 700 + i,
+              currency: 'INR',
+              category: 'MISC',
+              paymentMode: 'PERSONAL',
+              description: `offline drain ${runSuffix} #${String(i + 1)}`,
+            },
+          });
+        }
+
+        const queued = deadEngine.outbox.counts();
+        assertEquals(queued.pending, OFFLINE_OPS, 'the outbox did not hold every write enqueued while offline');
+
+        // Drain against the dead host. Every op must survive: a network failure
+        // is TRANSIENT, so the head stays pending and holds its lane rather
+        // than parking. An op that parked here would be a queue that discards
+        // work the moment the wifi drops.
+        const failedDrain = await deadEngine.drain();
+        assertEquals(failedDrain.applied, 0, 'a write landed against a host that is not listening');
+        assertEquals(failedDrain.parked, 0, 'a NETWORK failure parked an op — transient failures must not be terminal');
+        assertEquals(
+          deadEngine.outbox.counts().pending + deadEngine.outbox.counts().inflight,
+          OFFLINE_OPS,
+          'ops went missing across a failed drain',
+        );
+
+        deadEngine.close();
+        deadClient.close();
+        console.log(`  ${String(OFFLINE_OPS)} op(s) queued · drain against a dead host applied 0, parked 0, lost 0`);
+      },
+    );
+    passed++;
+
+    const drainReport = await step(
+      55,
+      'restore the connection and drain — ONE batched POST /api/v1/sync/push carries all six',
+      async () => {
+        // The SAME storage adapter, a live client. This is the restore.
+        const liveEngine = onGround.openOffline({ storage: offlineStorage, scope: `sim-${runSuffix}` });
+        await liveEngine.open();
+
+        const recovered = liveEngine.outbox.counts();
+        assertEquals(
+          recovered.pending,
+          OFFLINE_OPS,
+          'the queue did not survive the engine teardown — this is the durability claim, and it failed',
+        );
+
+        const report = await liveEngine.drain();
+        assertEquals(report.applied, OFFLINE_OPS, `only ${String(report.applied)} of ${String(OFFLINE_OPS)} queued ops landed`);
+        assertEquals(report.parked, 0, 'an op parked on the restored connection');
+        assertEquals(report.remaining, 0, 'the queue is not empty after a full drain');
+        assertTrue(
+          report.usedBatchTransport,
+          `${String(OFFLINE_OPS)} ops is above the batch threshold of 5, but the transport did not batch them`,
+        );
+        assertEquals(report.lanes.length, 1, 'six ops on one trip produced more than one lane');
+
+        liveEngine.close();
+        console.log(`  applied=${String(report.applied)} parked=${String(report.parked)} remaining=${String(report.remaining)} batched=${String(report.usedBatchTransport)}`);
+        return report;
+      },
+    );
+    passed++;
+
+    await step(
+      56,
+      'the batch really landed — the six queued expenses are readable back from the SERVER',
+      async () => {
+        // The drain report is the client's own account of what it did. This
+        // step is the independent one: a fresh read, from the server, for rows
+        // that only exist if the batch was actually applied. Without it, a
+        // transport that reported success while dropping the body would pass
+        // step 55 exactly as a working one does.
+        const { data } = unwrap(await onGround.expenses.list({ tripRef: onGroundTripRef }));
+        // `.items` is `(Expense | Tombstone)[]`, so it is narrowed before any
+        // field is read — a tombstone has no `description` and would otherwise
+        // silently fail the `startsWith` and undercount the batch.
+        const landed = data.items.filter(
+          (row): row is Exclude<typeof row, DeltaTombstone> =>
+            !isTombstone(row) && row.description.startsWith(`offline drain ${runSuffix}`),
+        );
+        assertEquals(
+          landed.length,
+          OFFLINE_OPS,
+          `the drain reported ${String(drainReport.applied)} applied, but the server has ${String(landed.length)} of the ${String(OFFLINE_OPS)} rows`,
+        );
+        console.log(`  ${String(landed.length)} of ${String(OFFLINE_OPS)} offline-queued expenses read back from the engine`);
+      },
+    );
+    passed++;
+
     console.log('\nTo run the browser half, start it with the manager session pair printed in step 8:');
     console.log('  pnpm dev   (from this repo, then open browser/ and call client.session.open() with that pair)');
     // The board only exists on the on-ground trip — the step-2 trip has no rooms
@@ -3107,19 +3595,19 @@ async function main(): Promise<void> {
     }
     process.exitCode = 1;
   } finally {
-    // Step 48 — close the client. ALWAYS runs, blocked steps or not: a run
-    // that stopped counting steps 1..46 as passed and step 47 as blocked
+    // Step 57 — close the client. ALWAYS runs, blocked steps or not: a run
+    // that stopped counting steps 1..55 as passed and step 56 as blocked
     // still has an open client to close, exactly as a genuine abort at any
     // earlier step always did (previously via a bare, unlogged
     // `kaafil.close()` in the catch above — now the same call, but as a real,
     // numbered, logged step every run reaches).
     try {
-      await step(48, 'close() the client', async () => {
+      await step(57, 'close() the client', async () => {
         kaafil.close(); // synchronous — no in-flight request survives it
       });
       passed++;
     } catch (err) {
-      console.error(`\nStep 48 FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`\nStep 57 FAILED: ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;
     }
 

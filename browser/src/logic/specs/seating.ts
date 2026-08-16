@@ -4,16 +4,21 @@
 // run() body was touched.
 //
 // LIVE WIRING (this pass): seating has no SDK resource group at all
-// (GAPS.md §5 / `on-ground/types.ts`'s header) — every operation, reads
-// included, is a manager-session write path only `on-ground/client.ts`
+// — every operation, reads included, is a manager-session path the SDK's
+// browser entry now wires directly (`client.seating`)
 // reaches. Every `live()` below goes through `managerClient()`.
 // `seating.veh`'s real body field is `regNo`, not `label` — the screen's
 // `label` param is what the sim calls a registration/tail number ('9W-2431'),
 // so it maps onto the real `regNo` field; `req()` below is corrected to say
 // so rather than promise a `label` key the engine does not read.
+//
+// LIVE WIRING (kaafil-js@0.1.0-beta.3): `managerClient()` is now the SDK's own
+// browser entry (`kaafil-js/client`), which wires this resource group for real.
+// The hand-rolled `on-ground/client.ts` that used to carry these calls has been
+// deleted. Badge `sdk`, not `raw`.
 import { managerClient } from '../live/transport';
-import { okLive, toFail } from '../live/lane';
-import { isTombstone } from '../../../../on-ground/types';
+import { okLive, toFail, unwrapSdk } from '../live/lane';
+import { isTombstone } from 'kaafil-js/client';
 import { AUTO_ASSIGN_REASONS, cannedPlanFingerprint, SEAT_GRID_TEMPLATE } from '../sim/fixtures';
 
 export const seatingSpecs = (c: any) => ({
@@ -31,7 +36,7 @@ export const seatingSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.seating.board({ tripRef: p.tripRef });
+        const { data, meta } = unwrapSdk(await mc.seating.read({ tripRef: p.tripRef }));
         const vehicles = data.vehicles.filter((v: any) => !isTombstone(v as any));
         return okLive({ vehicles, unassignedPool: data.unassignedPool.map((o: any) => o.travellerId), seatPendingCount: data.summary.seatPendingCount }, meta);
       } catch (e: any) { return toFail(e); }
@@ -62,7 +67,7 @@ export const seatingSpecs = (c: any) => ({
       try {
         const mc = managerClient();
         const wantsLayout = p.layout !== '(none)';
-        const { data, meta } = await mc.seating.createVehicle({ tripRef: p.tripRef, regNo: p.label, type: p.type, capacity: Number(p.capacity), layout: wantsLayout ? p.layout : undefined });
+        const { data, meta } = unwrapSdk(await mc.seating.vehicles.create({ tripRef: p.tripRef, regNo: p.label, type: p.type, capacity: Number(p.capacity), layout: wantsLayout ? p.layout : undefined }));
         return okLive({ ...data, seatMapSynthesised: data.seatMapped }, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -97,7 +102,7 @@ export const seatingSpecs = (c: any) => ({
       try {
         const mc = managerClient();
         const label = String(p.seatLabel || '').trim();
-        const { data, meta } = await mc.seating.assign({ tripRef: p.tripRef, travellerId: p.travellerId, vehicleId: p.vehicleId, seatLabel: label || null });
+        const { data, meta } = unwrapSdk(await mc.seating.assign({ tripRef: p.tripRef, travellerId: p.travellerId, vehicleId: p.vehicleId, seatLabel: label || null }));
         return okLive({ travellerId: data.travellerId, vehicleId: data.vehicleId, seatLabel: data.seatLabel, state: data.seatLabel ? 'SEATED' : 'SEAT_PENDING', droppedSeatLabel: data.droppedSeatLabel, displacedTravellerId: data.displacedTravellerId }, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -135,8 +140,18 @@ export const seatingSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const strategyOrder = String(p.rules).split(',').map((s: string) => s.trim()).filter(Boolean);
-        const { data, meta } = await mc.seating.autoAssign({ tripRef: p.tripRef, dryRun: !!p.dryRun, rules: { strategyOrder } });
+        // The SDK types `rules.strategyOrder` as a literal union, not `string[]` —
+        // a real narrowing the raw client did not have. Unrecognised strategy
+        // names are dropped HERE, by name, rather than cast past the checker:
+        // the engine would 422 them anyway, and silently sending a typo is
+        // exactly the class of bug the generated types exist to stop.
+        const KNOWN = ['gender', 'medicalFirst', 'parties', 'sameStop', 'balanceVehicles'] as const;
+        type Strategy = (typeof KNOWN)[number];
+        const strategyOrder = String(p.rules)
+          .split(',')
+          .map((s: string) => s.trim())
+          .filter((s: string): s is Strategy => (KNOWN as readonly string[]).includes(s));
+        const { data, meta } = unwrapSdk(await mc.seating.autoAssign({ tripRef: p.tripRef, dryRun: !!p.dryRun, rules: { strategyOrder } }));
         return okLive(data, meta);
       } catch (e: any) { return toFail(e); }
     }

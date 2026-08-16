@@ -83,7 +83,7 @@ export const expensesSpecs = (c: any) => ({
       if (p.paymentMode === 'FLOAT') m.float.balanceMinor -= row.amountMinor;
       return c.ok(row);
     },
-    // raw lane: `logExpense` is managerAuth-only. `category`/`paymentMode`
+    // sdk lane: `logExpense` is managerAuth-only. `category`/`paymentMode`
     // are translated through the maps above — see this file's header.
     live: async (p: any) => {
       try {
@@ -116,11 +116,11 @@ export const expensesSpecs = (c: any) => ({
       row.claimStatus = 'SUBMITTED'; row.version += 1;
       return c.ok({ id: row.id, claimStatus: 'SUBMITTED', decidedBy: 'the CRM, later', version: row.version });
     },
-    // raw lane: `submitExpenseClaim` is managerAuth-only and only succeeds
+    // sdk lane: `submitExpenseClaim` is managerAuth-only and only succeeds
     // on a row the CALLING manager themselves logged (404 otherwise, never
     // 403 — see the engine's own doc comment on this route).
     live: async (p: any) => {
-      try { return await managerClient().expenses.submitClaim({ tripRef: p.tripRef, id: p.expenseId }); }
+      try { return await managerClient().expenses.claims.submit({ tripRef: p.tripRef, expenseId: p.expenseId }); }
       catch (e) { return toFail(e); }
     }
   },
@@ -141,15 +141,15 @@ export const expensesSpecs = (c: any) => ({
       if (row.paymentMode === 'FLOAT') m.float.balanceMinor += row.amountMinor;
       return c.ok({ id: row.id, status: 'VOIDED', version: row.version });
     },
-    // raw lane: `voidExpense` is managerAuth-only and needs the row's real
+    // sdk lane: `voidExpense` is managerAuth-only and needs the row's real
     // `version` for `If-Match` — the UI's param bag carries only
     // `expenseId`, so this reads the live row first to find it (a second
     // real call, not a fabricated field).
     live: async (p: any) => {
       try {
         const client = managerClient();
-        const found: any = await client.expenses.read({ tripRef: p.tripRef, id: p.expenseId });
-        return await client.expenses.void({ tripRef: p.tripRef, id: p.expenseId, ifMatch: found.data.version, reason: p.reason });
+        const found: any = await client.expenses.read({ tripRef: p.tripRef, expenseId: p.expenseId });
+        return await client.expenses.void({ tripRef: p.tripRef, expenseId: p.expenseId, version: found.data.version, reason: p.reason });
       } catch (e) { return toFail(e); }
     }
   }

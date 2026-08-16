@@ -15,12 +15,12 @@ import { okLive, toFail } from '../live/lane';
 /** One real, read-only manager-lane call per flag `entitlement.gate` can
  * exercise — each resolves (200) if the flag is on, or throws the real
  * `402 PLAN_FEATURE_DISABLED` / `422 CAPABILITY_UNAVAILABLE` if not.
- * `files` has no entry: `on-ground/client.ts`'s `files` surface exposes only
+ * `files` has no entry: the SDK's `client.files` surface exposes only
  * per-file operations (`requestUpload`/`confirm`/`read`/`readUrl`), never a
  * per-trip list to probe generically the way the other five allow — see
  * `live()`'s handling of that flag below rather than inventing one. */
 const FLAG_PROBES: Record<string, (tripRef: string) => Promise<unknown>> = {
-  rooming: (tripRef) => managerClient().rooming.board({ tripRef }),
+  rooming: (tripRef) => managerClient().rooming.read({ tripRef }),
   collections: (tripRef) => managerClient().collections.list({ tripRef }),
   expenses: (tripRef) => managerClient().expenses.list({ tripRef }),
   float: (tripRef) => managerClient().float.readSummary({ tripRef }),
@@ -56,7 +56,7 @@ export const entitlementSpecs = (c: any) => ({
       if (p.flag === 'files') {
         return c.fail(
           'NotImplementedLocally', null, null,
-          'The manager-lane client (on-ground/client.ts) has no per-trip files LIST endpoint to probe with — only per-file requestUpload/confirm/read/readUrl, none of which this generic flag-check can call without a fileId already in hand. This is a real, structural gap in the demo client, not a network failure — see the live-wiring report.',
+          'The manager-lane client (kaafil-js/client) has no per-trip files LIST endpoint to probe with — only per-file request/confirm/meta/url, none of which this generic flag-check can call without a fileId already in hand. This is a real, structural gap in the CONTRACT (no list route exists), not a network failure — see GAPS.md.',
           { flag: 'files' }, 'no',
         );
       }
@@ -64,7 +64,7 @@ export const entitlementSpecs = (c: any) => ({
       if (!probe) return c.fail('NotImplementedLocally', null, null, 'Unknown flag "' + p.flag + '".', { flag: p.flag }, 'no');
       try {
         // Capturing the probe's own real `{data, meta}` — every entry in
-        // `FLAG_PROBES` is a real `on-ground/client.ts` call, so its `meta`
+        // `FLAG_PROBES` is a real `kaafil-js/client` call, so its `meta`
         // genuinely reached this trip's own real read; never a fabricated
         // stand-in.
         const probed = (await probe(p.tripRef)) as { meta?: unknown } | undefined;

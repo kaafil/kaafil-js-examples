@@ -21,7 +21,7 @@
   },
   "comment:play": "`play` runs backend/server.ts and vite browser concurrently in one process group with a trap so Ctrl-C stops both — a tiny bash one-liner, deliberately not a new npm-run-all-style dependency. Two terminals (`pnpm run backend` in one, `pnpm run dev` in the other) works exactly as well and is the more debuggable option — see backend/README.md.",
   "dependencies": {
-    "kaafil-js": "0.1.0-beta.2",
+    "kaafil-js": "0.1.0-beta.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "shiki": "^4.4.3"

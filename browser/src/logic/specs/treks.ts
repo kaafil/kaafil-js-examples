@@ -2,10 +2,10 @@
 // originally `export default`; only the export form changed, no run() body touched.
 //
 // LIVE WIRING (this pass): treks has no SDK resource group at all
-// (GAPS.md §5 / `on-ground/types.ts`'s header) — every operation is a
-// manager-session write path only `on-ground/client.ts` reaches. Every
+// — every operation is a manager-session write path the SDK's browser entry
+// now wires directly (`client.treks`). Every
 // `live()` below goes through `managerClient()`. The real routes are flat
-// `/api/v1/treks/{trekRef}/...` (`on-ground/client.ts`'s `treksPath`), never
+// `/api/v1/treks/{trekRef}/...` (the real engine routes), never
 // nested under `/api/v1/trips/{tripRef}/treks/...` — the manager session
 // itself is already scoped to one trip, so `trekRef: 'active'`
 // (`kaafil-js`'s `ACTIVE_TREK_REF`) resolves without a tripRef in the path.
@@ -13,8 +13,13 @@
 // `newStartDate`/`newEndDate`, never a `dayDelta` — resolved from a live
 // `itinerary.read` (the trip's own current dates) plus the delta, since that
 // resolution genuinely needs a live read and `req()` is synchronous.
+//
+// LIVE WIRING (kaafil-js@0.1.0-beta.3): `managerClient()` is now the SDK's own
+// browser entry (`kaafil-js/client`), which wires this resource group for real.
+// The hand-rolled `on-ground/client.ts` that used to carry these calls has been
+// deleted. Badge `sdk`, not `raw`.
 import { managerClient } from '../live/transport';
-import { okLive, toFail } from '../live/lane';
+import { okLive, toFail, unwrapSdk } from '../live/lane';
 
 const ACTIVE_TREK_REF = 'active';
 
@@ -34,7 +39,7 @@ export const treksSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.treks.board({ trekRef: p.trekRef });
+        const { data, meta } = unwrapSdk(await mc.treks.board({ trekRef: p.trekRef }));
         return okLive({
           trekRef: p.trekRef,
           state: data.emptyState ? 'EMPTY' : 'ACTIVE',
@@ -70,14 +75,14 @@ export const treksSpecs = (c: any) => ({
       try {
         const mc = managerClient();
         const n = Number(p.dayDelta) || 0;
-        const { data: board } = await mc.itinerary.read({ tripRef: p.tripRef });
+        const { data: board } = unwrapSdk(await mc.itinerary.read({ tripRef: p.tripRef }));
         const shift = (iso: string) => new Date(new Date(iso + 'T00:00:00Z').getTime() + n * 86400000).toISOString().slice(0, 10);
         const newStartDate = shift(board.trip.startDate);
         const newEndDate = shift(board.trip.endDate);
         // `meta` is `treks.postpone`'s own — the primary write; the
         // `itinerary.read` above is only a lookup to resolve the trip's
         // current dates.
-        const { data, meta } = await mc.treks.postpone({ trekRef: ACTIVE_TREK_REF, newStartDate, newEndDate, reason: p.reason });
+        const { data, meta } = unwrapSdk(await mc.treks.postpone({ trekRef: ACTIVE_TREK_REF, newStartDate, newEndDate, reason: p.reason }));
         return okLive({
           dayDelta: n, reason: p.reason,
           ripple: {
@@ -108,7 +113,7 @@ export const treksSpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.treks.walkIns.create({ trekRef: ACTIVE_TREK_REF, name: p.fullName, phone: p.phone || undefined });
+        const { data, meta } = unwrapSdk(await mc.treks.walkIns.create({ trekRef: ACTIVE_TREK_REF, name: p.fullName, phone: p.phone || undefined }));
         return okLive({
           travellerId: data.travellerId, fullName: data.name,
           glyph: data.name.split(' ').map((x: string) => x[0]).join('').slice(0, 2).toUpperCase(), tone: 'unknown.4',

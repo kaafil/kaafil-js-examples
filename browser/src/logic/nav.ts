@@ -23,6 +23,7 @@ export const GROUPS = [
     { id: 'float', label: 'Float', cred: 'mgr' } ] },
   { label: 'PHASE 5 · CLOSE-OUT', items: [
     { id: 'checklists', label: 'Checklists', cred: 'mgr' },
+    { id: 'closeout', label: 'Closing day', cred: 'mgr' },
     { id: 'files', label: 'Files & receipts', cred: 'mgr' },
     { id: 'vendors', label: 'Vendors', cred: 'key' },
     { id: 'webhooks', label: 'Webhooks & events', cred: 'key' } ] },

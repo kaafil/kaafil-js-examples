@@ -2,7 +2,7 @@
 // class field on `Component`).
 export const TITLES: Record<string, [string, string]> = {
   'guide-run': ['Run the Node simulator', 'Only needed for Connected mode — Simulated needs nothing running. Three processes, three jobs: our engine, your CRM backend, this tab.'],
-  'guide-map': ['What the 48 steps prove', 'Every numbered step in server/simulate.ts, mapped to the screen here that shows the same claim.'],
+  'guide-map': ['What the 57 steps prove', 'Every numbered step in server/simulate.ts, mapped to the screen here that shows the same claim.'],
   'guide-trouble': ['Troubleshooting', 'Symptom, cause, fix — including the three failures that look like a broken SDK and are not.'],
   tour: ['Guided tour', 'Eighteen lessons in dependency order, from ingesting a trip to draining an outbox.'],
   session: ['Session & auth', 'Two entry points, two credentials: kaafil-js carries the API key, kaafil-js/client never sees one.'],
@@ -14,6 +14,7 @@ export const TITLES: Record<string, [string, string]> = {
   pickups: ['Pickup points', 'One error code, two close policies: a TRIP hard-blocks, a TREK asks for confirmation.'],
   treks: ['Treks', 'A postpone that ripples into itinerary dates and the stay window while pickup times explicitly do not move.'],
   checklists: ['Checklists', 'Four reserved sections seeded inside trip-ingest’s own transaction, and a guard on status rather than version.'],
+  closeout: ['Closing day', 'Blockers the server owns, a version-guarded handover note, a lock that turns every on-ground write into a 423 — and a reopen only the CRM’s API key can perform.'],
   webhooks: ['Webhooks & events', 'Three edits inside one five-second window produce exactly one event.'],
   collections: ['Collections', 'Money in, captured on the ground: paise integers, the trip’s own currency, and an overpay guard that is a hard refusal rather than a toggle.'],
   expenses: ['Expenses & claims', 'What a manager spent, and the claim a manager files on their own money — with a decision that belongs to the CRM, not the phone.'],

@@ -3,7 +3,7 @@
 //
 // `live(p)` added per GAPS.md §5: `readSummary`/`readLedger`/`issue`/`adjust`
 // are `sdk` (apiKey-reachable — GAPS.md §5's per-operation audit); `return`
-// is `raw` (`managerAuth`-only). The real engine's field names differ from
+// is `managerAuth`-only, now wired on `client.float`. The real engine's field names differ from
 // the sim's ("managerId" not "managerRef"; a signed `direction` alongside an
 // always-positive `amountMinor`, not a signed one) — `req()` below and every
 // `live()` use the REAL wire shape, not the sim's; see each method's comment.
@@ -72,7 +72,7 @@ export const floatSpecs = (c: any) => ({
       m.float.movements.unshift({ id: 'flt_' + (++c.sim.seq), kind: 'RETURN', amountMinor: -amt, note: null, at: c.nowIso() });
       return c.ok({ kind: 'RETURN', amountMinor: amt, balanceMinor: m.float.balanceMinor });
     },
-    // raw lane: `returnFloat` is the ONE managerAuth-only float write
+    // sdk lane: `returnFloat` is the ONE managerAuth-only float write
     // (GAPS.md §5 — "the agency issues, the person returns").
     live: async (p: any) => {
       try { return await managerClient().float.return({ tripRef: p.tripRef, managerId: p.managerRef, amountMinor: Math.round(Number(p.amountMinor)) }); }

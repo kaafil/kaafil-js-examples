@@ -1,11 +1,16 @@
 // Ported verbatim from .design/logic.js lines 556-679 (`specs` object, 'itinerary.*' keys).
 // Every `this.` in the original method bodies becomes `c.` — that is the only edit to run().
 //
-// LIVE WIRING (this pass): every itinerary operation is `managerAuth`-only for
-// its writes, and `readItinerary`/`readItineraryChangeLog` accept managerAuth
-// too (GAPS.md §5's itinerary row) — so every `live()` below goes through
-// `managerClient()` (the on-ground manager-session client), never `sdkCall`,
-// which demonstrates the manager's own credential, the point of these screens.
+// LIVE WIRING: every itinerary operation is `managerAuth`-only for its writes,
+// and `readItinerary`/`readItineraryChangeLog` accept managerAuth too — so every
+// `live()` below goes through `managerClient()`, never `sdkCall`, which
+// demonstrates the manager's own credential, the point of these screens.
+//
+// As of `kaafil-js@0.1.0-beta.3` `managerClient()` IS the SDK's browser entry
+// (`kaafil-js/client`), not the deleted hand-rolled `on-ground/client.ts`:
+// `client.itinerary` is a real wired resource group. Every call below therefore
+// runs on the SDK's retry ladder, typed errors, automatic idempotency keys and
+// automatic 401-refresh — badge `sdk`, not `raw`.
 //
 // `live(p)` takes the same param bag `run(p)` takes and returns the SAME
 // envelope shape `run(p)` returns (`c.ok(...)`/`c.fail(...)`) so the views and
@@ -20,7 +25,7 @@
 // A real structural gap surfaces here and is fixed in `req()`, not hidden:
 // `addItineraryItem`/`patchItineraryItem`/`deleteItineraryItem`/
 // `reorderItineraryItem` all live at `/api/v1/trips/{tripRef}/itinerary/items…`
-// (see `on-ground/client.ts`'s `itineraryPath`), not the bare
+// (the real engine route), not the bare
 // `/api/v1/itinerary/items/...` the simulated-mode preview used to show, and
 // `addItineraryItem` takes `isoDate` (derived server-side from the trip's own
 // timezone), never a client-supplied `dayIndex` — `req()` below now shows the
@@ -29,8 +34,8 @@
 // is synchronous. `reorderItineraryItem`'s body key is `index`, not
 // `toPosition` — fixed likewise. None of this touches `run()` or `p`.
 import { managerClient } from '../live/transport';
-import { okLive, toFail } from '../live/lane';
-import { isTombstone } from '../../../../on-ground/types';
+import { okLive, toFail, unwrapSdk } from '../live/lane';
+import { isTombstone } from 'kaafil-js/client';
 
 export const itinerarySpecs = (c: any) => ({
   'itinerary.read': {
@@ -50,7 +55,7 @@ export const itinerarySpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.itinerary.read({ tripRef: p.tripRef });
+        const { data, meta } = unwrapSdk(await mc.itinerary.read({ tripRef: p.tripRef }));
         const rows = (data.items || []).filter((i: any) => !isTombstone(i as any));
         const days = data.days.map((d: any) => ({
           dayIndex: d.dayIndex, isoDate: d.isoDate, today: d.position === 'today',
@@ -82,7 +87,7 @@ export const itinerarySpecs = (c: any) => ({
     ],
     errs: [{ l: 'client-supplied sortOrder → 422', patch: { sortOrder: '0' } }],
     req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/itinerary/items', { isoDate: '(resolved from dayIndex ' + p.dayIndex + ' via a live itinerary.read)', title: p.title, type: p.kind, startTime: p.startTime || null, endTime: p.endTime || null }],
-    snip: (p: any) => `// managerAuth only — and KaafilClient exposes no itinerary group yet,\n// so today this write is a raw call. It becomes:\nawait client.itinerary.items.add({\n  tripRef: '${p.tripRef}', dayIndex: ${p.dayIndex},\n  title: '${p.title}', kind: '${p.kind}',\n  startTime: '${p.startTime}', endTime: '${p.endTime}',\n}); // no sortOrder: the server owns it`,
+    snip: (p: any) => `// managerAuth only — and since beta.3 KaafilClient wires the\n// itinerary group, so this is a typed SDK call:\nawait client.itinerary.items.add({\n  tripRef: '${p.tripRef}', dayIndex: ${p.dayIndex},\n  title: '${p.title}', kind: '${p.kind}',\n  startTime: '${p.startTime}', endTime: '${p.endTime}',\n}); // no sortOrder: the server owns it`,
     run: (p: any) => {
       const it = c.ensureItin(p.tripRef);
       if (!it) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref on this tenant.');
@@ -104,13 +109,13 @@ export const itinerarySpecs = (c: any) => ({
         return c.fail('KaafilValidationError', 'VALIDATION_ERROR', 422, 'sortOrder is not part of the write vocabulary. It is refused rather than quietly obeyed or quietly ignored — the server is the only writer of that integer.', { fields: { sortOrder: 'unrecognised property' } });
       try {
         const mc = managerClient();
-        const { data: board } = await mc.itinerary.read({ tripRef: p.tripRef });
+        const { data: board } = unwrapSdk(await mc.itinerary.read({ tripRef: p.tripRef }));
         const day = board.days.find((d: any) => d.dayIndex === Number(p.dayIndex));
         if (!day) return c.fail('KaafilValidationError', 'VALIDATION_ERROR', 422, 'dayIndex is outside this trip’s day range.', { fields: { dayIndex: 'out of range 0..' + (board.days.length - 1) } });
         // `meta` here is `addItem`'s own — the primary (only) write this
         // call makes; the `itinerary.read` above is a lookup only, its
         // meta not the one this response represents.
-        const { data: item, meta } = await mc.itinerary.addItem({ tripRef: p.tripRef, isoDate: day.isoDate, title: p.title, type: p.kind, startTime: p.startTime || undefined, endTime: p.endTime || undefined });
+        const { data: item, meta } = unwrapSdk(await mc.itinerary.items.add({ tripRef: p.tripRef, isoDate: day.isoDate, title: p.title, type: p.kind, startTime: p.startTime || undefined, endTime: p.endTime || undefined }));
         return okLive({ id: (item as any).id, title: (item as any).title, kind: (item as any).type, startTime: (item as any).startTime, endTime: (item as any).endTime, status: (item as any).status, sortOrder: (item as any).sortOrder, version: (item as any).version, updatedAt: (item as any).updatedAt, dayIndex: Number(p.dayIndex), sortOrderAssignedBy: 'server' }, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -121,7 +126,7 @@ export const itinerarySpecs = (c: any) => ({
     p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'itemId', l: 'itemId', k: 'sel', d: (r: any) => c.allItems(r).map((i: any) => i.id) }, { n: 'status', l: 'status', k: 'sel', v: 'COMPLETE', o: ['COMPLETE', 'CANCELLED', 'PLANNED'] }],
     errs: [{ l: 'try to pin LIVE → 422', patch: { status: 'LIVE' } }],
     req: (p: any) => ['PATCH', '/api/v1/trips/' + p.tripRef + '/itinerary/items/' + p.itemId, { status: p.status }],
-    snip: (p: any) => `await client.itinerary.items.patch({\n  itemId: '${p.itemId}', status: '${p.status}',\n  ifMatch: item.version,   // version guard, not a timestamp\n});`,
+    snip: (p: any) => `await client.itinerary.items.patch({\n  itemId: '${p.itemId}', status: '${p.status}',\n  version: item.version,   // version guard, not a timestamp\n});`,
     run: (p: any) => {
       if (p.status === 'LIVE') return c.fail('KaafilValidationError', 'VALIDATION_ERROR', 422, 'LIVE is absent from the write vocabulary outright — it is derived on read from the clock and the item’s own window, so a client cannot pin one.', { fields: { status: 'must be one of PLANNED, COMPLETE, CANCELLED' } });
       const it = c.ensureItin(p.tripRef); if (!it) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
@@ -138,14 +143,14 @@ export const itinerarySpecs = (c: any) => ({
       if (p.status === 'LIVE') return c.fail('KaafilValidationError', 'VALIDATION_ERROR', 422, 'LIVE is absent from the write vocabulary outright — it is derived on read from the clock and the item’s own window, so a client cannot pin one.', { fields: { status: 'must be one of PLANNED, COMPLETE, CANCELLED' } });
       try {
         const mc = managerClient();
-        // `ifMatch` is a real version guard the engine enforces — resolved
+        // `version` is a real version guard (an If-Match header the SDK sets) the engine enforces — resolved
         // from a live read of the item's current row, never guessed.
-        const { data: board } = await mc.itinerary.read({ tripRef: p.tripRef });
+        const { data: board } = unwrapSdk(await mc.itinerary.read({ tripRef: p.tripRef }));
         const current = (board.items || []).find((i: any) => !isTombstone(i as any) && (i as any).id === p.itemId) as any;
         if (!current) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No item with that id on this trip.');
         // `meta` is `patchItem`'s own — the primary write; the earlier read
-        // was only to resolve `ifMatch`.
-        const { data, meta } = await mc.itinerary.patchItem({ tripRef: p.tripRef, itemId: p.itemId, ifMatch: current.version, patch: { status: p.status } });
+        // was only to resolve `version`.
+        const { data, meta } = unwrapSdk(await mc.itinerary.items.patch({ tripRef: p.tripRef, itemId: p.itemId, version: current.version, status: p.status }));
         return okLive({ id: (data as any).id ?? p.itemId, status: (data as any).status ?? p.status, version: (data as any).version ?? current.version + 1 }, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -172,7 +177,7 @@ export const itinerarySpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.itinerary.reorderItem({ tripRef: p.tripRef, itemId: p.itemId, index: Number(p.toPosition) });
+        const { data, meta } = unwrapSdk(await mc.itinerary.items.reorder({ tripRef: p.tripRef, itemId: p.itemId, index: Number(p.toPosition) }));
         return okLive({ dayIndex: (data as any).dayIndex, run: (data as any).items.map((i: any) => ({ id: i.id, title: i.title, sortOrder: i.sortOrder, startTime: i.startTime })) }, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -197,10 +202,10 @@ export const itinerarySpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data: board } = await mc.itinerary.read({ tripRef: p.tripRef });
+        const { data: board } = unwrapSdk(await mc.itinerary.read({ tripRef: p.tripRef }));
         const current = (board.items || []).find((i: any) => !isTombstone(i as any) && (i as any).id === p.itemId) as any;
         if (!current) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No item with that id on this trip.');
-        const { meta } = await mc.itinerary.deleteItem({ tripRef: p.tripRef, itemId: p.itemId, ifMatch: current.version });
+        const { meta } = unwrapSdk(await mc.itinerary.items.remove({ tripRef: p.tripRef, itemId: p.itemId, version: current.version }));
         return okLive({ deleted: p.itemId, tombstoneQueued: true }, meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -218,7 +223,7 @@ export const itinerarySpecs = (c: any) => ({
     live: async (p: any) => {
       try {
         const mc = managerClient();
-        const { data, meta } = await mc.itinerary.changeLog({ tripRef: p.tripRef });
+        const { data, meta } = unwrapSdk(await mc.itinerary.changeLog.list({ tripRef: p.tripRef }));
         return okLive(data.map((l: any) => ({ at: l.createdAt, actor: (l.actorName || l.actorType), text: l.summary })), meta);
       } catch (e: any) { return toFail(e); }
     }
@@ -249,7 +254,7 @@ export const itinerarySpecs = (c: any) => ({
         const mc = managerClient();
         const skew = p.source !== 'meta.serverTime';
         const since = skew ? new Date(new Date(c.sim.cursor).getTime() + 400).toISOString() : c.sim.cursor;
-        const { data, meta } = await mc.itinerary.read({ tripRef: p.tripRef, since });
+        const { data, meta } = unwrapSdk(await mc.itinerary.read({ tripRef: p.tripRef, since }));
         c.sim.cursor = meta.serverTime;
         const rows = data.items.map((i: any) => isTombstone(i as any) ? i : { id: (i as any).id, title: (i as any).title, sortOrder: (i as any).sortOrder, status: (i as any).status, version: (i as any).version });
         // The same real `meta` just used to advance the cursor above is what

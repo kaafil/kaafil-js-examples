@@ -3,15 +3,15 @@
 //
 // `live(p)` added per GAPS.md §5's per-operation audit: `read`/`tpl` are
 // `sdk` (apiKey-reachable, proxied through the backend's `/sdk` dispatcher);
-// `add`/`toggle`/`remove`/`pull` are `raw` (`managerAuth`-only — no SDK
-// client can reach them, `on-ground/client.ts` is the only path). See
+// `add`/`toggle`/`remove`/`pull` are `managerAuth`-only (no SDK
+// client could reach them; since beta.3 `client.checklists` wires them). See
 // `../live/lane.ts`'s header for the shared `okFromSdk`/`toFail` envelope
 // contract every `live()` below relies on.
 //
 // `req()` below was fixed alongside `live()` where it previously described a
 // path the engine does not have (`/checklists` plural, `/checklists/
 // sections/{id}/items`) — the real routes are singular, `/checklist/...`,
-// per `kaafil-js/src/resources/checklists.ts` and `on-ground/client.ts`'s
+// per `kaafil-js/src/resources/checklists.ts`'s
 // `checklistPath`. The preview must match what `live()` actually sends.
 
 import { sdkCall, managerClient } from '../live/transport';
@@ -62,7 +62,7 @@ export const add = (c: any) => ({
     sec.items.push(item);
     return c.ok({ ...item, sectionId: sec.id, gateDerivedFrom: 'section.phase = ' + sec.phase });
   },
-  // raw lane: `addChecklistItem` is managerAuth-only.
+  // sdk lane: `addChecklistItem` is managerAuth-only.
   live: async (p: any) => {
     try {
       const res = await managerClient().checklists.items.add({
@@ -93,7 +93,7 @@ export const toggle = (c: any) => ({
     it.status = it.status === 'OPEN' ? 'COMPLETE' : 'OPEN'; it.version += 1;
     return c.ok({ id: it.id, status: it.status, version: it.version, section: sec.id });
   },
-  // raw lane: `toggleChecklistItem` is managerAuth-only.
+  // sdk lane: `toggleChecklistItem` is managerAuth-only.
   live: async (p: any) => {
     try {
       return await managerClient().checklists.items.toggle({ tripRef: p.tripRef, itemId: p.itemId, expectedStatus: p.expectedStatus });
@@ -118,7 +118,7 @@ export const remove = (c: any) => ({
     sec.items = sec.items.filter((i: any) => i.id !== it.id);
     return c.ok({ deleted: it.id, section: sec.id });
   },
-  // raw lane: `removeChecklistItem` is managerAuth-only, and (unlike
+  // sdk lane: `removeChecklistItem` is managerAuth-only, and (unlike
   // `toggle`) needs the item's real `version` for `If-Match` — the UI's
   // param bag carries only `itemId`, so this reads the live aggregate first
   // to find it. A second real call, not a fabricated one.
@@ -128,7 +128,7 @@ export const remove = (c: any) => ({
       const agg: any = await client.checklists.read({ tripRef: p.tripRef });
       const found = (agg.data.sections || []).flatMap((s: any) => (s.items || []).map((i: any) => ({ ...i, sectionId: s.id }))).find((i: any) => i.id === p.itemId);
       if (!found) return { err: { name: 'KaafilNotFoundError', code: 'RESOURCE_NOT_FOUND', status: 404, message: 'No checklist item with that id on the live trip.', details: null, retryable: 'no' } };
-      return await client.checklists.items.remove({ tripRef: p.tripRef, itemId: p.itemId, ifMatch: found.version });
+      return await client.checklists.items.remove({ tripRef: p.tripRef, itemId: p.itemId, version: found.version });
     } catch (e) { return toFail(e); }
   }
 });
@@ -154,7 +154,7 @@ export const pull = (c: any) => ({
   req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/checklist/pull-template', { templateSectionId: p.templateId, mode: 'append' }],
   snip: (p: any) => `await client.checklists.templates.pull({ tripRef, templateSectionId: '${p.templateId}', mode: 'append' });\n// sourceSectionId is provenance, never a live link`,
   run: (p: any) => c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No template with that id for this agency — the library is empty, so every id answers this. The refusal proves the operation is wired, not that your call was malformed.'),
-  // raw lane: `pullChecklistTemplate` is managerAuth-only and genuinely
+  // sdk lane: `pullChecklistTemplate` is managerAuth-only and genuinely
   // 404s today — GAPS.md §5's stub table names why, and the note above says
   // it plainly: this is a real, wired call, not a stub card.
   live: async (p: any) => {

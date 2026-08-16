@@ -6,7 +6,7 @@
 // (`readFile`/`readFileUrl` accept an API key). `files.request` is the ONE
 // method in this job where `live()` does more than proxy a single call: it
 // requests the real presigned slot, PUTs the actual bytes straight to
-// storage from the browser (never through the engine — see `on-ground/
+// storage from the browser (never through the engine — see the
 // upload.ts`'s `putPresignedBytes`, which this reuses), THEN confirms. If
 // the signed host is unreachable from the browser (this repo's own
 // documented docker-compose minio-hostname problem), that PUT rejection is
@@ -23,7 +23,7 @@
 // covers the shared envelope contract.
 
 import { sdkCall, managerClient } from '../live/transport';
-import { toFail } from '../live/lane';
+import { toFail, unwrapSdk } from '../live/lane';
 
 const PURPOSE_TO_REAL: Record<string, string> = {
   EXPENSE_RECEIPT: 'expense_receipt',
@@ -47,13 +47,13 @@ export const filesSpecs = (c: any) => ({
       c.sim.files.unshift(f);
       return c.ok({ fileKey: f.key, putUrl: 'https://s3.ap-south-1.example/kaafil/' + f.key + '?X-Amz-Expires=900&…', expiresInSeconds: 900, note: 'unconfirmed uploads are reclaimed by the orphan sweep' });
     },
-    // raw lane: `requestFileUpload`/`confirmFileUpload` are managerAuth-
+    // sdk lane: `requestFileUpload`/`confirmFileUpload` are managerAuth-
     // only. This is the real three-step presigned flow: request a slot, PUT
     // synthetic bytes of the DECLARED size straight to the returned
     // `uploadUrl` with a plain `fetch` (never through the engine — no
     // Kaafil auth header on this call, ever), then confirm.
     //
-    // `on-ground/upload.ts` is NOT reused here — that file's own header
+    // A Node-side presigned-PUT helper is NOT reusable here — its own
     // states it is Node-only (`node:http`, never `fetch`) and imported ONLY
     // by `server/simulate.ts`, specifically because it drops to `node:http`
     // to override the `Host` header (a `KAAFIL_STORAGE_LOCAL_PROXY`
@@ -69,10 +69,10 @@ export const filesSpecs = (c: any) => ({
           return { err: { name: 'NothingToActOn', code: null, status: null, message: 'files.request needs a real tripRef to upload against — paste one above (a ref you\'ve pushed via trips.upsert).', details: null, retryable: 'no' } };
         }
         const client = managerClient();
-        const slot = await client.files.requestUpload({
+        const slot = unwrapSdk(await client.files.request({
           purpose: (PURPOSE_TO_REAL[p.purpose] || 'expense_receipt') as any,
           tripRef: p.tripRef, contentType: p.contentType, sizeBytes: Number(p.sizeBytes),
-        });
+        }));
         try {
           const putRes = await fetch(slot.data.uploadUrl, {
             method: 'PUT',
@@ -94,13 +94,13 @@ export const filesSpecs = (c: any) => ({
             err: {
               name: 'TransportError', code: 'UPLOAD_HOST_UNREACHABLE', status: null,
               message: `The engine issued a real presigned PUT (${slot.data.uploadUrl}), but the browser could not reach it: ${msg}. If this signed host names a docker-compose service hostname (e.g. "minio"), it resolves only INSIDE that compose network — a browser fetch has no equivalent of ` +
-                "on-ground/upload.ts's node:http Host-header override (fetch forbids setting Host at all), so there is no local workaround here, only the honest failure. See this repo's README for the full diagnosis. " +
+                "the node:http Host-header override a Node caller can use (fetch forbids setting Host at all), so there is no local workaround here, only the honest failure. See this repo's README for the full diagnosis. " +
                 'The upload slot is real and still PENDING; it was not silently marked confirmed.',
               details: { fileId: slot.data.fileId, uploadUrl: slot.data.uploadUrl }, retryable: 'no',
             },
           };
         }
-        const confirmed = await client.files.confirm({ fileId: slot.data.fileId });
+        const confirmed = unwrapSdk(await client.files.confirm({ fileId: slot.data.fileId }));
         const expiresInSeconds = Math.max(0, Math.round((new Date(slot.data.expiresAt).getTime() - Date.now()) / 1000));
         return { data: { fileKey: slot.data.fileId, putUrl: slot.data.uploadUrl, expiresInSeconds, confirmedStatus: confirmed.data.status }, meta: slot.meta };
       } catch (e) { return toFail(e); }
@@ -118,10 +118,10 @@ export const filesSpecs = (c: any) => ({
       f.status = 'READY';
       return c.ok({ fileKey: f.key, status: 'READY', usableAs: 'receiptFileKey on an expense, or proof on a checklist item' });
     },
-    // raw lane: `confirmFileUpload` is managerAuth-only.
+    // sdk lane: `confirmFileUpload` is managerAuth-only.
     live: async (p: any) => {
       try {
-        const res: any = await managerClient().files.confirm({ fileId: p.fileKey });
+        const res: any = unwrapSdk(await managerClient().files.confirm({ fileId: p.fileKey }));
         return { data: { fileKey: res.data.id, status: String(res.data.status).toUpperCase(), usableAs: 'receiptFileKey on an expense, or proof on a checklist item' }, meta: res.meta };
       } catch (e) { return toFail(e); }
     }
