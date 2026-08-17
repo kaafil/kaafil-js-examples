@@ -3535,7 +3535,17 @@ async function main(): Promise<void> {
           'the queue did not survive the engine teardown — this is the durability claim, and it failed',
         );
 
-        const report = await liveEngine.drain();
+        // `connectivityRestored` is the whole point of this step, and it is the
+        // SDK gap this repo exposed (`C-120`). Step 54's drain against the dead
+        // host earned the head a backoff rung — correctly: a network failure is
+        // transient, not fatal. But that rung is a guess about a network that
+        // was down, and THIS caller is the one who knows it is back, because it
+        // just built a live client. Without the claim the drain honours the rung
+        // in full and answers `applied: 0` with no error at all; at the top of
+        // `RETRY_LADDER_MS` a reconnected device would wait an hour. Rungs the
+        // SERVER asked for (`5xx`, `429`, `Retry-After`) are deliberately NOT
+        // shortened by it.
+        const report = await liveEngine.drain({ connectivityRestored: true });
         assertEquals(report.applied, OFFLINE_OPS, `only ${String(report.applied)} of ${String(OFFLINE_OPS)} queued ops landed`);
         assertEquals(report.parked, 0, 'an op parked on the restored connection');
         assertEquals(report.remaining, 0, 'the queue is not empty after a full drain');
