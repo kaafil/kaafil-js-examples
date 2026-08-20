@@ -1,8 +1,15 @@
 # Kaafil Gap Register
 
-**As of:** 2026-08-20 · **re-verified against the newly vendored 289-operation spec** shipped with
-`kaafil-js@0.1.0-beta.5`. Previously re-verified at 223 operations (2026-08-16, phases 14/15) and at
-214 (phases 12/13); originally written against 162.
+**As of:** 2026-08-20 (second pass, same day) · **re-verified against `kaafil-js`'s browser-entry
+surface after the GAP-fix wave** (trek walk-in list, `journey.capabilities(live=true)`, agency
+settings read/write, `travellers.create`, vendor CRUD, checklist-template publish — see
+`kaafil-product-docs/ui-kit/11-engine-requirements.md`). The playground grew from 193 to **201
+methods across the same 28 module screens**; 200 are `sdk`, 1 remains `console`
+(`entitlement.read`), and **`plan` is at zero** — nothing in this pass closed a `plan` row because
+nothing in this repo was still carrying one (see the "Closed since this audit" note below for the
+one row that DID close: `no-vendor-ingest-endpoint`). Previously re-verified against the
+289-operation spec shipped with `kaafil-js@0.1.0-beta.5` (2026-08-20, first pass), at 223 operations
+(2026-08-16, phases 14/15), and at 214 (phases 12/13); originally written against 162.
 
 **What moved in this pass (223 → 289 operations, beta.3 → beta.5):** three long-standing rows closed
 on evidence — `dsar-erasure-export-unbuilt` (both DPDP routes now exist and are wrapped),
@@ -10,7 +17,8 @@ on evidence — `dsar-erasure-export-unbuilt` (both DPDP routes now exist and ar
 provider-credential half of `comms-no-production-sender` (a real vault route exists). A fourth,
 `agency-settings-endpoint-nonexistent`, **changed shape rather than closing** — the route now exists
 but is `consoleAuth`, so it has moved from §3 to §2 as boundary `B9`. The playground grew from 84 to
-**175 methods across 28 module screens** — see §5.
+**193 methods across 28 module screens** by 2026-08-20's first pass, and to **201** after the
+same-day GAP-fix wave — see §5.
 
 **Consolidation pass, same day.** The 2026-08-20 work landed in parallel tracks that were then merged.
 The merge itself produced two findings this register now carries, and both are recorded because a
@@ -101,7 +109,7 @@ Sorted P0 → P3. "Lands in" cites `implementation-plan/README.md`'s phase table
 | ~~`closing-day-unbuilt`~~ **CLOSED 2026-08-16** | ~~Blockers, close-out lock, and closing pack have no endpoints~~ — **shipped in Phase 14.** Five operations are live: `readCloseout` (`managerAuth`+`apiKeyAuth`), `saveCloseoutHandover`, `lockCloseout` (`managerAuth`), `unlockCloseout` (**`apiKeyAuth` only** — reopening is a back-office decision, not the locking manager's) and `exportCloseoutPack`. The blocker key inventory is **closed at eleven keys**, so a consumer may safely switch over them. `canLock`/`lockDisabledReason` are re-derived server-side on every read — a client must not recompute the verdict from the blocker array. After a lock, every on-ground write on the trip answers `423 LOCKED`, which the SDK classifies as fatal/park repo-wide | crm-backend + manager-device | — | **none needed.** `client.closeout.*`; `unlock` on the API-key client | shipped (phase 14) |
 | ~~`dsar-erasure-export-unbuilt`~~ **CLOSED 2026-08-20** | ~~Traveller erasure and DSAR export are documented but still not in the shipped contract~~ — **both shipped.** `POST /api/v1/travellers/{ref}/erase` (`eraseTraveller`) and `GET /api/v1/travellers/{ref}/export` (`exportTraveller`) are in the 289-operation spec, both `security: [apiKeyAuth]`, and both are wrapped by `kaafil-js@0.1.0-beta.5` (`src/resources/travellers.ts`; `EraseTravellerOptions`/`ExportTravellerOptions` on the server entry). Erasure is an **anonymize-in-place**, idempotent on `Traveller.erasedAt` — a second erase reports the same `erasedAt` with every cascade count at zero. Export is generated fresh per call, never a cached snapshot | crm-backend | — | **none needed.** `kaafil.travellers.erase()` / `kaafil.travellers.export_()` — driven for real by the new `travellers` playground screen | shipped (phase 17) |
 | ~~`agency-admin-upsert-no-sdk-method`~~ **CLOSED 2026-08-20** | ~~No SDK method wraps `upsertAgencyAdmin`~~ — **shipped in `kaafil-js@0.1.0-beta.5`.** `src/resources/agency-admins.ts` exists and `AgencyAdminsResource`/`UpsertAgencyAdminOptions` are exported from the server entry. `POST /api/v1/agency-admins` is still `security: [apiKeyAuth]`; what changed is the client, not the contract. **The raw-REST workaround this row documented is now a rule violation, not a workaround** (`CLAUDE.md` R4) | sdk-ergonomics | — | **none needed.** `kaafil.agencyAdmins.upsert({ externalAgencyId, fullName, sourceUpdatedAt })` — driven by the new `agencyAdmins` playground screen. Note `sourceUpdatedAt` is required and is never defaulted, and `externalAgencyId` is resolved once at first ingest and immutable after | shipped |
-| `no-vendor-ingest-endpoint` | Vendor directory still has no writable surface — no `POST /api/v1/vendors`, no assign/swap | crm-backend | **Re-verified 2026-08-20 against the 289-operation spec: unchanged.** `/api/v1/trips/{ref}/vendors` is still the ONLY vendor path, and it is a read (`listTripVendors`, `apiKeyAuth`+`managerAuth`+`agencyAdminAuth`) | none — vendors is an optional capability-gated module; nothing breaks running a trip without it | unscheduled |
+| ~~`no-vendor-ingest-endpoint`~~ **CLOSED 2026-08-20 (second pass)** | ~~Vendor directory still has no writable surface~~ — **CRUD shipped (GAP-005).** `PUT`/`DELETE /api/v1/agencies/{ref}/vendors/{externalVendorId}` (`upsertVendor`/`deleteVendor`) are live, both `apiKeyAuth`+`agencyAdminAuth` (never `managerAuth` — an agency-wide CRM-fed record, not a trip-level write), and both are wrapped (`kaafil-js/src/resources/vendors.ts`). **Vendor-rating remains unbuilt and is a separate, deferred module** — no `VendorRating` model exists; only a reserved entitlement flag, a `vendor.rated` webhook name, and a closeout-blocker knob are plumbed. Driven by the new `vendors.upsert`/`vendors.remove` playground cards | crm-backend | — | **none needed** for CRUD. Vendor ratings still have no API — see `feedback-nps-comms-vendor-rating-unbuilt` below, unchanged | shipped |
 | `feedback-nps-comms-vendor-rating-unbuilt` **PARTLY CLOSED** | **feedback-nps and engagement-comms shipped** (Phase 12/13). **`vendor-rating` remains unbuilt.** Two live caveats on comms below: it has no production sender, and no plan ceiling | crm-backend | `modules/feedback-nps/FRD.md:3`, `engagement-comms/FRD.md:3`, `vendor-rating/FRD.md:3` all `Status: Planned` | none via API | phase 12 (feedback-nps, vendor-rating), phase 13 (engagement-comms) |
 | ~~`share-token-lifecycle-partial`~~ **CLOSED** | ~~No `PATCH` or `regenerate`~~ — **both shipped in Phase 12.** Expiry clamps UP to at least `Trip.endDate + max(reopenDays)`; `regenerate` honours `keepOld` | crm-backend | `openapi.json` and `resources/share-tokens.ts` both expose exactly three operations | revoke and mint a brand-new token — loses `keepOld` semantics, forces redistributing a new link | phase 12 |
 | ~~`sync-digest-not-on-server-entry`~~ **CLOSED 2026-08-20** | ~~`GET /api/v1/sync/digest` (`syncDigest`) was live and wrapped as `sync.digest`, but no shipped `kaafil-js` entry point could call it~~ — **fixed SDK-side.** `kaafil-js/src/client.ts`'s `Kaafil` (the server entry, the one holding the API key) now wires `createSyncResource` onto `.sync` too, so the entry point whose credential satisfies `syncDigest`'s `['apiKeyAuth']` scheme finally carries the method | sdk-ergonomics | — | **none needed.** `kaafil.sync.digest({ agencyRef })` — `backend/server.ts`'s `ALLOWLISTED_SDK_PATHS` now carries `'sync.digest'`, and `./specs/offline.ts`'s `offline.digest` card has a real `live()` driving it. The playground's `offline.digest` card is back to badged `sdk` | shipped |
@@ -264,10 +272,16 @@ Three states, and none of them is `raw`:
 | `plan` | there is no endpoint at all, or it is not yet built | no — this would be the stub set |
 | `console` | the operation is `consoleAuth`-only by deliberate design (`B1`/`B3`) — no API key or manager credential will ever satisfy it | no, and never — this is a boundary, not a "coming soon" |
 
-**Counts as of 2026-08-20, after consolidation: 175 methods across 28 module screens. 174 are `sdk`.
-1 is `console` (`entitlement.read`). None are `plan` — `offline.digest` closed same-day, see
-`sync-digest-not-on-server-entry` in §3.** By lane: **98 lane B** (your CRM backend, API key) and
-**77 lane D** (this device, manager session). The 2026-08-16 audit read 84 methods across 20 screens;
+**Counts as of 2026-08-20, after consolidation: 193 methods across 28 module screens** (this section's
+own narrative below undercounted at 175 immediately after the consolidation pass — a bookkeeping gap
+between this prose and `methods.ts`'s actual rows, corrected here rather than left to compound; the
+per-screen table two paragraphs down was already accurate). **192 were `sdk`, 1 `console`
+(`entitlement.read`), 0 `plan`** — `offline.digest` closed same-day, see
+`sync-digest-not-on-server-entry` in §3. **A second same-day pass (the GAP-fix wave: trek walk-in
+list, `journey.capabilities(live=true)`, agency settings read/write, `travellers.create`, vendor
+CRUD, checklist-template publish) added six more — 201 methods, 200 `sdk`, 1 `console`, 0 `plan`.**
+By lane, after that second pass: **113 lane B** (your CRM backend, API key) and **88 lane D** (this
+device, manager or agency-admin session). The 2026-08-16 audit read 84 methods across 20 screens;
 an intermediate count during this same pass read 109 across 24, before the second wave of screens and
 CRUD tails landed. Before all of that, 75 methods with 44 of them `raw` and one `plan` (the 44 moved
 to `sdk` wholesale when `on-ground/` was deleted).
@@ -284,6 +298,18 @@ to `sdk` wholesale when `on-ground/` was deleted).
 | `feedbackNps` | 2 | B | `agency` (`apiKeyAuth`+`agencyAdminAuth`), `trip` (+`managerAuth`) — read-only rollups, API-key-side |
 | `forms` | 29 | B | the authoring lifecycle, sections/fields CRUD, aggregate/responses/export/consent-receipt, and the trip-scoped dispatch/answers surface. Several trip-scoped ops accept `managerAuth`/`agencyAdminAuth` in the spec, and — since `kaafil-js/src/client-entry.ts` closed the wiring gap that used to leave `forms` off the browser entry — 28 of the 29 (all but `aggregate`) are now genuinely reachable from a `managerClient()`/`adminSdkClient()`-held session too. Still lane B here: `forms` is a module-level resource, not an on-ground device screen, so it keeps the `vendors.list`/`trips`/`agencies` API-key-side posture rather than moving to lane D |
 | `test` | 5 | B | `advanceTime`/`clock`/`resetClock`/`fixtures`/`quota` — all `apiKeyAuth`, all TEST-plane-only. `browser/src/logic/specs/test.ts` refuses locally (via `resolveEnvironment()` off the backend's `/health`) when the backend's key resolves to the LIVE plane, mirroring the SDK's own `TestEnvironmentRequiredError` at this repo's boundary. That is a runtime precondition on a real call, **not** a fourth badge |
+
+**The six new cards from the 2026-08-20 GAP-fix wave** (all `sdk`, added to existing screens rather
+than new screens — every underlying gap was closed by widening an existing operation or adding a
+sibling route, never a brand-new module): `journey.capsLive` (B — `capabilities({ live: true })`,
+GAP-003, the same three-scheme operation `journey.caps` already drives); `treks.walkinList` (D —
+`listTrekWalkIns`, GAP-006, multi-scheme, same posture as `treks.board`); `agencies.settingsGet` (B
+— `getAgencySettingsSelf`, GAP-002, apiKeyAuth+agencyAdminAuth) and `agencies.settingsPatch` (D —
+`patchAgencySettingsSelf`, GAP-002, agencyAdminAuth-only, runs direct against the engine through an
+open agency-admin session since no apiKey path can ever satisfy it); `travellers.create` (B —
+`createTraveller`, GAP-008, apiKeyAuth+agencyAdminAuth); `vendors.upsert`/`vendors.remove` (B —
+GAP-005, apiKeyAuth+agencyAdminAuth, never managerAuth) — this closes `no-vendor-ingest-endpoint`;
+`checklists.agencyTplPublish` (B — GAP-004, the DRAFT→PUBLISHED transition).
 
 **…and the CRUD tails / singletons added to existing screens** (all `sdk`): `session.notifRead` (D);
 `trips.parties`×4 + `trips.managerList`/`managerPatch` (B, multi-scheme); `journey.rebuild`/`runStep`/
@@ -351,7 +377,7 @@ What is still worth stating, because it is a product shape and not a client deta
 `float.issue`/`adjust` accept an API key while `float.return` does not. That is not an oversight — the
 agency issues cash, the person returns it.
 
-### The stub set — 1 of the 175 methods
+### The stub set — 1 of the 201 methods
 
 Everything else on the 28 module screens runs for real in Connected mode, through the SDK. The set grew
 by exactly one in the 2026-08-20 consolidation (`offline.digest`, `plan`), and shrank back by that same
@@ -402,11 +428,25 @@ with their phase, not as greyed-out method tabs:
 - ~~**the testing sandbox's clock + fixture generator**~~ — **SHIPPED** on `apiKeyAuth` and now on its
   own playground screen (`test`, five methods). Off `notbuilt`. Its webhook test-event trigger is
   `consoleAuth` and stays boundary `B1`; see the `testing-sandbox-entirely-unbuilt` row in §3.
-- **vendor writes** — no create/assign/swap endpoint exists; `vendors.list` is the whole module.
+- ~~**vendor writes**~~ — **SHIPPED 2026-08-20 (second pass), GAP-005.** `vendors.upsert`/`.remove`
+  (`PUT`/`DELETE /api/v1/agencies/{ref}/vendors/{externalVendorId}`) are live and on the same `vendors`
+  screen `vendors.list` already occupied. Off `notbuilt`; see the (now closed)
+  `no-vendor-ingest-endpoint` row above. Vendor **ratings** are the part still unbuilt — no
+  `VendorRating` model exists, only reserved plumbing (an entitlement flag, a `vendor.rated` webhook
+  name, a closeout-blocker knob) — see `feedback-nps-comms-vendor-rating-unbuilt` below.
 - ~~**share token `PATCH` / `regenerate`**~~ — **BOTH SHIPPED** (Phase 12), and as of 2026-08-20 both
   are driven by the playground too (`share.patch` / `share.regenerate`). Off `notbuilt`.
-- **agency settings** — the routes now exist but are `consoleAuth`. This does **not** belong on
-  `notbuilt`, which is for things with no endpoint; it is boundary `B9`.
+- **agency settings** — the `consoleAuth` pair (`getAgencySettings`/`patchAgencySettings`) is still
+  boundary `B9`, unchanged. **A SEPARATE partner-facing sibling route shipped 2026-08-20 (second
+  pass), GAP-002:** `GET`/`PATCH /api/v1/agencies/{ref}/settings/self`
+  (`getAgencySettingsSelf`/`patchAgencySettingsSelf`) — the engine's own answer to "widen the auth
+  array" being architecturally impossible (`pipeline()` throws at import time if `consoleAuth` ever
+  joins a multi-scheme set, `D-070`). `settings.get` accepts `apiKeyAuth` OR `agencyAdminAuth`;
+  `settings.patch` is `agencyAdminAuth`-only — an API key can read this agency's operational knobs but
+  never write them. Both are wrapped (`kaafil-js/src/resources/agencies.ts`) and driven by the
+  `agencies` screen's new `settingsGet`/`settingsPatch` cards (`settingsPatch` is lane D — it runs
+  direct against the engine through an open agency-admin session, since no API-key path can ever
+  satisfy it). Off `notbuilt`.
 - **reviews, tickets** — deferred by decision `D-025`. These are a *boundary*, not a backlog item, and
   must read that way.
 - **webhook endpoint registration, API key lifecycle, agency entitlement writes, usage + ingest log** —

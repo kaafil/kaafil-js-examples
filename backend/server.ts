@@ -160,6 +160,11 @@ const ALLOWLISTED_SDK_PATHS: ReadonlySet<string> = new Set([
   'journey.triggers.patch',
 
   'vendors.list',
+  // The agency's own vendor directory CRUD (GAP-005, this pass) —
+  // apiKeyAuth OR agencyAdminAuth, never managerAuth. Closes GAPS.md's
+  // `no-vendor-ingest-endpoint`.
+  'vendors.upsert',
+  'vendors.remove',
 
   'shareTokens.create',
   'shareTokens.read',
@@ -176,6 +181,9 @@ const ALLOWLISTED_SDK_PATHS: ReadonlySet<string> = new Set([
   'checklists.agencyTemplates.create',
   'checklists.agencyTemplates.patch',
   'checklists.agencyTemplates.remove',
+  // The DRAFT -> PUBLISHED transition (GAP-004, this pass) — same accept
+  // pair as every other `agencyTemplates.*` method above.
+  'checklists.agencyTemplates.publish',
 
   'webhooks.deliveries.list',
   'webhooks.deliveries.read',
@@ -231,6 +239,14 @@ const ALLOWLISTED_SDK_PATHS: ReadonlySet<string> = new Set([
   // `vendors.list`'s precedent.
   'agencies.upsert',
   'agencies.managers.listPage',
+  // `agencies.settings.get` (GAP-002, this pass) — `getAgencySettingsSelf`
+  // accepts apiKeyAuth OR agencyAdminAuth, so it is reachable through this
+  // backend's API key. `agencies.settings.patch` is agencyAdminAuth-ONLY —
+  // deliberately NOT allowlisted here; it cannot be reached through this
+  // API-key `/sdk` dispatcher at all, and runs instead direct against the
+  // engine through an open agency-admin session
+  // (`browser/src/logic/specs/agencies.ts`'s `agencies.settingsPatch`).
+  'agencies.settings.get',
 
   // `agencyAdmins.*` (this pass) — apiKeyAuth-only, dual-mode identity, LWW.
   // Closes GAPS.md's `agency-admin-upsert-no-sdk-method`.
@@ -249,6 +265,9 @@ const ALLOWLISTED_SDK_PATHS: ReadonlySet<string> = new Set([
   'travellers.listForTrip',
   'travellers.listForAgency',
   'travellers.listForAgencyPage',
+  // `travellers.create` (GAP-008, this pass) — apiKeyAuth OR agencyAdminAuth,
+  // never managerAuth: the agency-directory write, not a trip roster add.
+  'travellers.create',
 
   // `comms.*` (this pass) — the CRM/agency-admin messaging configuration
   // surface. Every operation is apiKeyAuth-only per
