@@ -26,7 +26,10 @@ export const HELPERS = {
     const start = new Date(t.startDate + 'T00:00:00Z'), end = new Date(t.endDate + 'T00:00:00Z');
     const days: any[] = [];
     for (let i = 0; i <= Math.round((end.getTime() - start.getTime()) / 86400000); i++) {
-      days.push({ i, isoDate: new Date(start.getTime() + i * 86400000).toISOString().slice(0, 10), items: [] });
+      // `cardTitle`/`summaryLine`/`version` (this job) — the fields
+      // `itinerary.dayPatch` reads and writes, mirroring `ItineraryDayResponse`
+      // so the sim fixture can round-trip a real version guard.
+      days.push({ i, isoDate: new Date(start.getTime() + i * 86400000).toISOString().slice(0, 10), items: [], cardTitle: 'Day ' + (i + 1), summaryLine: null, version: 1 });
     }
     const seed: any[] = [
       ['Breakfast at base camp', 'MEAL', '08:00', '09:00'],
@@ -68,12 +71,19 @@ export const HELPERS = {
     const t = this.sim.trips[ref]; if (!t) return null;
     if (this.sim.room[ref]) return this.sim.room[ref];
     const occ = this.ROSTER.slice(0, Math.max(0, t.roster)).map(([id, fullName, glyph, tone]: any) => ({ travellerId: id, fullName, glyph, tone, assignSource: null }));
+    // One seeded stay window — real rooms always belong to a window
+    // (`RoomingRoomResponse.stayWindowId`), so the sim's rooms are given the
+    // same, `win_101`, rather than leaving the field a fiction only the live
+    // lane fills in.
+    const stayWindows: any[] = [
+      { id: 'win_101', label: 'Base camp lodge', startDate: t.startDate + 'T12:00:00Z', endDate: t.endDate + 'T10:00:00Z', sortOrder: 0, version: 1 }
+    ];
     const rooms: any[] = [
-      { id: 'rm_101', code: 'R101', roomType: 'QUAD', capacity: 4, status: 'OPEN', beds: ['A', 'B', 'C', 'D'].map(bedLabel => ({ bedLabel, occupant: null })) },
-      { id: 'rm_102', code: 'R102', roomType: 'TWIN', capacity: 2, status: 'OPEN', beds: ['A', 'B'].map(bedLabel => ({ bedLabel, occupant: null })) }
+      { id: 'rm_101', stayWindowId: 'win_101', code: 'R101', roomType: 'QUAD', capacity: 4, status: 'OPEN', version: 1, beds: ['A', 'B', 'C', 'D'].map(bedLabel => ({ bedLabel, occupant: null })) },
+      { id: 'rm_102', stayWindowId: 'win_101', code: 'R102', roomType: 'TWIN', capacity: 2, status: 'OPEN', version: 1, beds: ['A', 'B'].map(bedLabel => ({ bedLabel, occupant: null })) }
     ];
     occ.slice(0, 2).forEach((o: any, n: number) => { rooms[0].beds[n].occupant = { ...o, assignSource: 'MANUAL' }; });
-    this.sim.room[ref] = { rooms, unassigned: occ.slice(2) };
+    this.sim.room[ref] = { rooms, unassigned: occ.slice(2), stayWindows };
     return this.sim.room[ref];
   },
 
@@ -82,7 +92,10 @@ export const HELPERS = {
     if (this.sim.seat[ref]) return this.sim.seat[ref];
     const pool = this.ROSTER.slice(0, Math.max(0, t.roster)).map(([id, fullName, glyph, tone]: any) => ({ travellerId: id, fullName, glyph, tone }));
     this.sim.seat[ref] = {
-      vehicles: [{ id: 'veh_bus2', label: 'Bus 2', type: 'BUS', layout: null, capacity: 20, seatMap: null, assignments: [] }],
+      // `version` (optimistic concurrency) and `managerRef`/`managerId` (the
+      // vehicle-manager link) are real `SeatingVehicleResponse` fields the
+      // fixture previously left out because nothing here wrote them yet.
+      vehicles: [{ id: 'veh_bus2', label: 'Bus 2', type: 'BUS', layout: null, capacity: 20, seatMap: null, assignments: [], version: 1, managerRef: null, managerId: null }],
       pool
     };
     return this.sim.seat[ref];
@@ -92,10 +105,14 @@ export const HELPERS = {
     const t = this.sim.trips[ref]; if (!t) return null;
     if (this.sim.pick[ref]) return this.sim.pick[ref];
     const r = this.ROSTER;
+    // `kind`/`sortOrder`/`version` (this job) — the fields `pickups.patch`,
+    // `pickups.remove` and `pickups.reorder` read and write, mirroring
+    // `PickupStopResponse` so the sim fixture can round-trip a real version
+    // guard and a real per-kind sort order.
     this.sim.pick[ref] = {
       stops: [
-        { id: 'stp_1', name: 'Andheri Station', scheduledTime: '06:30', status: 'OPEN', travellers: [{ ...this.occ(r[0]), status: 'BOARDED' }, { ...this.occ(r[1]), status: 'PENDING' }] },
-        { id: 'stp_2', name: 'Dadar TT', scheduledTime: '07:10', status: 'OPEN', travellers: [{ ...this.occ(r[2]), status: 'BOARDED' }, { ...this.occ(r[3]), status: 'BOARDED' }] }
+        { id: 'stp_1', name: 'Andheri Station', scheduledTime: '06:30', status: 'OPEN', kind: 'PICKUP', sortOrder: 0, version: 1, travellers: [{ ...this.occ(r[0]), status: 'BOARDED' }, { ...this.occ(r[1]), status: 'PENDING' }] },
+        { id: 'stp_2', name: 'Dadar TT', scheduledTime: '07:10', status: 'OPEN', kind: 'PICKUP', sortOrder: 1, version: 1, travellers: [{ ...this.occ(r[2]), status: 'BOARDED' }, { ...this.occ(r[3]), status: 'BOARDED' }] }
       ]
     };
     return this.sim.pick[ref];

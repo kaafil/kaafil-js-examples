@@ -8,7 +8,7 @@ integrator; **this file explains the constraints to whoever edits it.** Where th
 
 ## 1. What this repo is
 
-Two views of one product, driven by the same **84 method specs**:
+Two views of one product, driven by the same **175 method specs** (84 until the 2026-08-20 consolidation):
 
 - **`browser/`** — a React playground, one screen per module `kaafil-js` can reach, with a **Simulated**
   mode (no engine, no key, no network) and a **Connected** mode (real HTTP against a real engine).
@@ -64,7 +64,16 @@ change is wrong. This is the repo's best feature and the first thing a new reade
 | `plan` | there is no endpoint at all, or it is not built yet | no — this would be the stub set |
 | `console` | the operation is `consoleAuth`-only by deliberate design (`B1`/`B3`) | no, and never — a boundary, not a "coming soon" |
 
-**As of 2026-08-16: 84 methods. 83 `sdk`, 1 `console` (`entitlement.read`), 0 `plan`.**
+**As of 2026-08-20: 193 methods across 28 module screens. 192 `sdk`, 1 `console`
+(`entitlement.read`), 0 `plan`.** `plan` is back at zero: `offline.digest` was the sole holdout, and
+its cause was SDK-side wiring, not an unbuilt endpoint — `syncDigest` is `apiKeyAuth`, and `sync` was
+wired only onto the browser entry (manager session, wrong credential) while the server entry holding
+the API key had no `sync` at all. `kaafil-js@0.1.0-beta.5` wires `createSyncResource` onto BOTH
+entries, `backend/server.ts`'s `ALLOWLISTED_SDK_PATHS` carries `'sync.digest'`, and the card is
+badged `sdk` with a real `live()`. See `GAPS.md`'s `sync-digest-not-on-server-entry` (CLOSED).
+
+`plan` being at zero is a fact about today, not a target to defend: if a future card has no endpoint,
+badge it `plan` and say so. Do not hand-roll a request to keep this count at zero.
 
 **The fourth badge, `raw`, is GONE — and understanding why is the point of this rule.** `raw` meant
 "the endpoint is live, but no SDK client can reach it (`managerAuth`-only writes) — live via
@@ -129,7 +138,7 @@ Run from this directory. All three are green as shipped and must stay green:
 
 ```bash
 pnpm typecheck     # tsc --noEmit
-pnpm test          # tsx --test browser/src/dc/*.test.ts   (13 tests)
+pnpm test          # tsx --test browser/src/dc/*.test.ts   (18 tests)
 pnpm build         # tsc --noEmit && vite build browser
 ```
 
@@ -189,8 +198,9 @@ not the output. Hand-edits there are lost on the next run.
   drift**, and it has been two waves stale before. Re-vendor before assuming an operation is missing.
 - **`shareAuth` was accepted by zero operations** when `GAPS.md` was written. That is no longer true — the
   traveller share fetch surface and the forms write-back both shipped. Re-check before repeating it.
-- **The vendored spec is at 223 operations** as of 2026-08-16 (was 214, and 162 when `GAPS.md` was first
-  written). Two of the three largest rows in that register closed between those numbers. Any sentence
-  you find here or in `README.md` that counts operations is a snapshot — verify it, do not repeat it.
+- **The vendored spec is at 289 operations** as of 2026-08-20 (was 223, 214, and 162 when `GAPS.md` was
+  first written). Two of the three largest rows in that register closed between those numbers. Any
+  sentence you find here or in `README.md` that counts operations is a snapshot — verify it, do not
+  repeat it.
 - The engine's background **worker must be running** for Connected mode: `trips.upsert` and manager
   assignment enqueue a journey build, and `journey.get` answers `404` until a worker lands it.

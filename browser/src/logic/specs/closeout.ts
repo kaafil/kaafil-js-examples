@@ -56,7 +56,7 @@ export const closeoutSpecs = (c: any) => ({
       { n: 'tripRef', l: 'tripRef', k: 'sel' },
       { n: 'handoverNote', l: 'handoverNote', k: 'text', v: 'All travellers dropped at Rishikesh. Float reconciled with Anil.' }
     ],
-    req: (p: any) => ['PUT', '/api/v1/trips/' + p.tripRef + '/closeout/handover', { handoverNote: p.handoverNote, expectedVersion: '(read first)' }],
+    req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/closeout/handover', { handoverNote: p.handoverNote, expectedVersion: '(read first)' }],
     snip: (p: any) => `const before = await client.closeout.get({ tripRef });\nawait client.closeout.saveHandover({\n  tripRef, handoverNote: '…', expectedVersion: before.version,\n});`,
     run: (p: any) => {
       c.sim.closeHandover = p.handoverNote;

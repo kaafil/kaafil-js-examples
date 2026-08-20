@@ -9,12 +9,21 @@
 // `live()` use the REAL wire shape, not the sim's; see each method's comment.
 // `../live/lane.ts`'s header explains the shared `okFromSdk`/`toFail`
 // envelope contract and why array/list responses need `meta` synthesized.
+//
+// This job: the card that used to live at the `'float.read'` key was
+// mislabeled `float.balance` — its `run()`/`live()` have always driven `GET
+// .../float/{managerId}/ledger` (one manager's full movement history),
+// never the trip-wide summary `readFloatSummary` actually names. Renamed to
+// `'float.ledger'` (matching `methods.ts`'s `float.ledger` id) and a real
+// `'float.summary'` added below for the actual summary read — entirely
+// derived, one row per manager who has ever had a movement on this trip
+// (`float.ts`'s own header).
 
 import { sdkCall, managerClient } from '../live/transport';
 import { okFromSdk, okLive, toFail } from '../live/lane';
 
 export const floatSpecs = (c: any) => ({
-  'float.read': {
+  'float.ledger': {
     lane: 'D', view: 'money',
     note: 'The balance is the sum of its movements, never a stored number — which is what makes the negative-float guard checkable rather than a hope.',
     p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'managerRef', l: 'managerRef', k: 'text', v: 'mgr_lead_01', ref: true, refHint: "paste the id trips.managers.upsert's response returned — mgr_lead_01 only exists in Simulated mode" }],
@@ -41,6 +50,33 @@ export const floatSpecs = (c: any) => ({
         }));
         const balanceMinor = rows.length ? rows[rows.length - 1].runningBalanceMinor : 0;
         return okLive({ managerRef: p.managerRef, balanceMinor, movements }, raw.meta);
+      } catch (e) { return toFail(e); }
+    }
+  },
+  'float.summary': {
+    lane: 'D', view: 'money',
+    note: 'Entirely derived — issuedMinor/returnedMinor/spentMinor/adjustmentsMinor/balanceMinor, nothing stored. since narrows WHICH managers are returned (only those with a movement at or after the cursor); every returned row still carries its FULL current balance, never a partial delta — see float.ts’s own header on why this is not a ../delta/cursor.ts cursor.',
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }],
+    req: (p: any) => ['GET', '/api/v1/trips/' + p.tripRef + '/float', null],
+    snip: () => `const { data } = await kaafil.float.readSummary({ tripRef });\n// data — one row per manager who has ever had a movement on this trip`,
+    run: (p: any) => {
+      const m = c.ensureMoney(p.tripRef); if (!m) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const issuedMinor = m.float.movements.filter((x: any) => x.kind === 'ISSUE').reduce((n: number, x: any) => n + x.amountMinor, 0);
+      const returnedMinor = -m.float.movements.filter((x: any) => x.kind === 'RETURN').reduce((n: number, x: any) => n + x.amountMinor, 0);
+      const adjustmentsMinor = m.float.movements.filter((x: any) => x.kind === 'ADJUSTMENT').reduce((n: number, x: any) => n + x.amountMinor, 0);
+      const spentMinor = m.expenses.filter((e: any) => e.paymentMode === 'FLOAT' && e.status !== 'VOIDED').reduce((n: number, e: any) => n + e.amountMinor, 0);
+      return c.ok({ data: [{ managerId: 'mgr_lead_01', managerRef: 'mgr_lead_01', issuedMinor, returnedMinor, spentMinor, adjustmentsMinor, balanceMinor: m.float.balanceMinor, currency: 'INR' }] });
+    },
+    // sdk lane: `readFloatSummary` accepts an API key, same posture
+    // `float.ledger` already takes for `readFloatLedger`. `FloatSummaryResponse`
+    // is `{ data: [...] }` — the same object-not-bare-array shape
+    // `readFloatLedger` returns, so its real `meta` genuinely survives the
+    // backend's `/sdk` dispatcher and is threaded through here, never
+    // replaced with a fallback stand-in.
+    live: async (p: any) => {
+      try {
+        const raw: any = await sdkCall(['float', 'readSummary'], { tripRef: p.tripRef });
+        return okLive(raw.data || [], raw.meta);
       } catch (e) { return toFail(e); }
     }
   },

@@ -1,15 +1,26 @@
 // Ported from .design/logic.js lines 1435-1469 (`specs` object, 'offline.*' keys),
 // then extended for the offline layer that shipped in `kaafil-js@0.1.0-beta.3`.
 //
-// LIVE(): all five methods here are real. `offline.cursor` and `offline.idem`
+// LIVE(): all six methods here are real. `offline.cursor` and `offline.idem`
 // ride on `itinerary`/`expenses`; `offline.outbox`, `offline.pull` and
 // `offline.push` drive the SDK's own offline engine (`client.openOffline(...)`)
 // against a real IndexedDB store and a real `POST /api/v1/sync/push`.
+// `offline.digest` runs lane B, through `sdkCall(['sync','digest'])` — the
+// one card on this screen that is a CRM-backend drift check, not an
+// on-ground read.
 //
 // `offline.outbox` used to be the one SIM-ONLY card in this whole playground —
 // `no-offline-outbox` in GAPS.md, tagged Phase 15, with a comment saying "there
 // is no write-ahead queue anywhere to call". There is now, so it has one.
-import { managerClient } from '../live/transport';
+//
+// `offline.digest` used to be the one card here with no `live()` at all —
+// `sync-digest-not-on-server-entry` in GAPS.md: `syncDigest` is
+// `apiKeyAuth`-only, but `sync` was wired only onto `kaafil-js/client`'s
+// manager-session entry, and the server entry holding the API key had no
+// `.sync` at all. That gap is closed (`kaafil-js/src/client.ts` now wires
+// `createSyncResource` onto the server entry's `Kaafil` too), so this has a
+// real `live()` like every other card on this screen.
+import { managerClient, resolveAgencyRef, sdkCall } from '../live/transport';
 import { okLive, toFail, unwrapSdk } from '../live/lane';
 import { offlineEngineFor, resetOfflineEngine } from '../live/offline';
 
@@ -298,6 +309,47 @@ export const offlineSpecs = (c: any) => ({
       try {
         const dropped = await resetOfflineEngine();
         return okLive({ cleared: true, database: dropped, note: 'engine closed and its IndexedDB database deleted' }, null);
+      } catch (e) {
+        return toFail(e);
+      }
+    }
+  },
+  'offline.digest': {
+    lane: 'B', view: 'outbox',
+    note: 'One row per active trip, with a stable hash for cheap drift detection — apiKeyAuth-only, so unlike every other offline.* method above, this is your CRM backend’s job, not the on-ground engine’s. Compare each hash against your own and re-push only the trips that differ, instead of blind re-pushes of the whole book.',
+    p: [{ n: 'agencyRef', l: 'agencyRef (blank = this tenant’s own)', k: 'text', v: '' }],
+    req: (p: any) => ['GET', '/api/v1/sync/digest' + (p.agencyRef ? '?agencyRef=' + p.agencyRef : ''), null],
+    snip: () => `const { data } = await kaafil.sync.digest({ agencyRef });\n// one row per active trip: { tripId, externalTripId, travellerCount, balanceMinorSum, maxSourceUpdatedAt, hash }`,
+    run: () => c.ok(Object.values(c.sim.trips).map((t: any) => ({
+      tripId: t.ref,
+      externalTripId: t.externalId,
+      travellerCount: t.roster,
+      balanceMinorSum: 0,
+      maxSourceUpdatedAt: c.nowIso(),
+      hash: 'demo_' + t.ref + '_v' + t.version,
+    }))),
+    // `live()` (this pass) — `sync-digest-not-on-server-entry` is CLOSED.
+    // `kaafil-js/src/client.ts`'s `Kaafil` (the server entry, the one holding
+    // `KAAFIL_API_KEY`) now wires `createSyncResource` onto `.sync`, so the
+    // entry point whose credential satisfies `syncDigest`'s `['apiKeyAuth']`
+    // scheme finally carries the method too — R4's `sdk` needs both halves,
+    // and now it has them. `sdkCall(['sync','digest'])` resolves to a real
+    // callable method through `backend/server.ts`'s `/sdk` dispatcher (see
+    // that file's `ALLOWLISTED_SDK_PATHS`), so this no longer trips the
+    // dispatcher's own "does not resolve to a callable method" 500.
+    //
+    // `agencyRef` follows `./comms.ts`'s own
+    // optional-field-resolved-via-`resolveAgencyRef()` convention: blank
+    // resolves to this backend's own tenant via `GET /health`.
+    //
+    // `digest` answers a bare `readonly SyncDigestRow[]`, so its real `meta`
+    // never survives the backend's `JSON.stringify` on an array — same
+    // reasoning as `vendors.list`/`journey.capabilities`/`journey.trig`.
+    live: async (p: any) => {
+      try {
+        const agencyRef = p.agencyRef || (await resolveAgencyRef());
+        const body = await sdkCall(['sync', 'digest'], { agencyRef });
+        return okLive(body, (body as any)?.meta);
       } catch (e) {
         return toFail(e);
       }

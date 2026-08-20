@@ -59,7 +59,7 @@ export const seatingSpecs = (c: any) => ({
       // capacity — never synthesised from capacity/layout maths. See
       // sim/fixtures.ts's header for why.
       const seatMap = wantsLayout ? SEAT_GRID_TEMPLATE.slice(0, cap) : null;
-      const veh = { id: 'veh_' + (++c.sim.seq), label: p.label, type: p.type, layout: wantsLayout ? p.layout : null, capacity: cap, seatMap, assignments: [] };
+      const veh = { id: 'veh_' + (++c.sim.seq), label: p.label, type: p.type, layout: wantsLayout ? p.layout : null, capacity: cap, seatMap, assignments: [], version: 1, managerRef: null, managerId: null };
       s.vehicles.push(veh);
       return c.ok({ ...veh, seatMapSynthesised: !!seatMap });
     },
@@ -104,6 +104,146 @@ export const seatingSpecs = (c: any) => ({
         const label = String(p.seatLabel || '').trim();
         const { data, meta } = unwrapSdk(await mc.seating.assign({ tripRef: p.tripRef, travellerId: p.travellerId, vehicleId: p.vehicleId, seatLabel: label || null }));
         return okLive({ travellerId: data.travellerId, vehicleId: data.vehicleId, seatLabel: data.seatLabel, state: data.seatLabel ? 'SEATED' : 'SEAT_PENDING', droppedSeatLabel: data.droppedSeatLabel, displacedTravellerId: data.displacedTravellerId }, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  // --- seating.vehicles.patch / .remove / .manager.link / .manager.unlink
+  // (this pass) — patch/remove/unlink all need the vehicle's real `version`
+  // for `If-Match`, the same guard `itinerary.patch`/`itinerary.remove`
+  // already model: the UI's param bag never carries a `version` field, so
+  // `live()` resolves it from a fresh `seating.read` immediately before the
+  // write, exactly as those two do.
+  'seating.vehiclePatch': {
+    lane: 'D', view: 'seat',
+    note: 'A capacity-down (or a layout swap) that would orphan a recorded seat label is 422 SEATING_CAPACITY_ORPHAN naming orphanedCount/orphanedLabels — on a seat-less vehicle the same code fires on a plain headcount, because there is no label to name.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' },
+      { n: 'vehicleId', l: 'vehicleId', k: 'sel', d: (r: any) => { const s = c.ensureSeat(r); return s ? s.vehicles.map((v: any) => v.id) : ['veh_bus2']; } },
+      { n: 'label', l: 'new regNo (blank = unchanged)', k: 'text', v: '' },
+      { n: 'capacity', l: 'new capacity (blank = unchanged)', k: 'text', v: '' }
+    ],
+    errs: [{ l: 'capacity drop orphans a seat → 422', patch: { vehicleId: 'veh_bus2', capacity: '0' } }],
+    req: (p: any) => ['PATCH', '/api/v1/trips/' + p.tripRef + '/seating/vehicles/' + p.vehicleId, { ...(p.label ? { regNo: p.label } : {}), ...(String(p.capacity).trim() !== '' ? { capacity: Number(p.capacity) } : {}) }],
+    snip: (p: any) => `await client.seating.vehicles.patch({\n  tripRef: '${p.tripRef}', vehicleId: '${p.vehicleId}',\n  ${p.label ? `regNo: '${p.label}', ` : ''}${String(p.capacity).trim() !== '' ? `capacity: ${p.capacity}, ` : ''}version: vehicle.version,   // version guard, not a timestamp\n});`,
+    run: (p: any) => {
+      const s = c.ensureSeat(p.tripRef); if (!s) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const veh = s.vehicles.find((v: any) => v.id === p.vehicleId);
+      if (!veh) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No vehicle with that id on this trip.');
+      if (String(p.capacity).trim() !== '') {
+        const cap = Math.max(1, Number(p.capacity));
+        if (veh.seatMap) {
+          const keep = SEAT_GRID_TEMPLATE.slice(0, cap);
+          const orphanedLabels = veh.assignments.filter((a: any) => a.seatLabel && !keep.includes(a.seatLabel)).map((a: any) => a.seatLabel);
+          if (orphanedLabels.length)
+            return c.fail('KaafilApiError', 'SEATING_CAPACITY_ORPHAN', 422, 'Dropping capacity to ' + cap + ' would orphan seat(s) ' + orphanedLabels.join(', ') + ' — refused rather than silently vacating whoever holds them.', { orphanedCount: orphanedLabels.length, orphanedLabels });
+          veh.seatMap = keep;
+        } else if (veh.assignments.length > cap) {
+          return c.fail('KaafilApiError', 'SEATING_CAPACITY_ORPHAN', 422, 'Dropping capacity to ' + cap + ' is below this vehicle’s current occupant count — refused rather than silently evicting someone.', { orphanedCount: veh.assignments.length - cap, orphanedLabels: [] });
+        }
+        veh.capacity = cap;
+      }
+      if (p.label) veh.label = p.label;
+      veh.version += 1;
+      return c.ok(veh);
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data: board } = unwrapSdk(await mc.seating.read({ tripRef: p.tripRef }));
+        const current = (board.vehicles || []).find((v: any) => !isTombstone(v as any) && (v as any).id === p.vehicleId) as any;
+        if (!current) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No vehicle with that id on this trip.');
+        const { data, meta } = unwrapSdk(await mc.seating.vehicles.patch({
+          tripRef: p.tripRef, vehicleId: p.vehicleId, version: current.version,
+          ...(p.label ? { regNo: p.label } : {}),
+          ...(String(p.capacity).trim() !== '' ? { capacity: Number(p.capacity) } : {}),
+        }));
+        return okLive({ ...data, seatMapSynthesised: (data as any).seatMapped }, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  'seating.vehicleRemove': {
+    lane: 'D', view: 'seat',
+    note: 'Unlike a rooming room, there is no force branch here: FRD §3’s own shape always clears occupants to the pool and unlinks the manager, then deletes the row, one transaction — releasedCount reports how many travellers returned to the unassigned pool. A recorded seat label is discarded with the grid.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' },
+      { n: 'vehicleId', l: 'vehicleId', k: 'sel', d: (r: any) => { const s = c.ensureSeat(r); return s ? s.vehicles.map((v: any) => v.id) : ['veh_bus2']; } }
+    ],
+    req: (p: any) => ['DELETE', '/api/v1/trips/' + p.tripRef + '/seating/vehicles/' + p.vehicleId, null],
+    snip: (p: any) => `await client.seating.vehicles.remove({ tripRef: '${p.tripRef}', vehicleId: '${p.vehicleId}', version: vehicle.version });`,
+    run: (p: any) => {
+      const s = c.ensureSeat(p.tripRef); if (!s) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const idx = s.vehicles.findIndex((v: any) => v.id === p.vehicleId);
+      if (idx < 0) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No vehicle with that id on this trip.');
+      const [veh] = s.vehicles.splice(idx, 1);
+      const released = veh.assignments.length;
+      s.pool.push(...veh.assignments.map((a: any) => ({ travellerId: a.travellerId, fullName: a.fullName, glyph: a.glyph, tone: a.tone })));
+      return c.ok({ id: veh.id, deleted: true, releasedCount: released });
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data: board } = unwrapSdk(await mc.seating.read({ tripRef: p.tripRef }));
+        const current = (board.vehicles || []).find((v: any) => !isTombstone(v as any) && (v as any).id === p.vehicleId) as any;
+        if (!current) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No vehicle with that id on this trip.');
+        const { data, meta } = unwrapSdk(await mc.seating.vehicles.remove({ tripRef: p.tripRef, vehicleId: p.vehicleId, version: current.version }));
+        return okLive(data, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  'seating.managerLink': {
+    lane: 'D', view: 'seat',
+    note: 'A manager owns at most one vehicle and a vehicle has at most one manager (both partial uniques) — linking a manager already on another vehicle MOVES them: the prior link clears in the same transaction, named in demotedVehicleId, never a silent double-link.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' },
+      { n: 'vehicleId', l: 'vehicleId', k: 'sel', d: (r: any) => { const s = c.ensureSeat(r); return s ? s.vehicles.map((v: any) => v.id) : ['veh_bus2']; } },
+      { n: 'managerRef', l: 'managerRef', k: 'text', v: 'MGR-104' }
+    ],
+    req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/seating/vehicles/' + p.vehicleId + '/manager', { managerRef: p.managerRef }],
+    snip: (p: any) => `await client.seating.vehicles.manager.link({\n  tripRef: '${p.tripRef}', vehicleId: '${p.vehicleId}', managerRef: '${p.managerRef}',\n});`,
+    run: (p: any) => {
+      const s = c.ensureSeat(p.tripRef); if (!s) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const veh = s.vehicles.find((v: any) => v.id === p.vehicleId);
+      if (!veh) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No vehicle with that id on this trip.');
+      let demotedVehicleId: string | null = null;
+      s.vehicles.forEach((v: any) => {
+        if (v.id !== veh.id && v.managerRef === p.managerRef) { demotedVehicleId = v.id; v.managerRef = null; v.managerId = null; v.version += 1; }
+      });
+      veh.managerRef = p.managerRef;
+      veh.managerId = 'mgr_' + String(p.managerRef).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+      veh.version += 1;
+      return c.ok({ vehicleId: veh.id, managerId: veh.managerId, linked: true, demotedVehicleId, version: veh.version });
+    },
+    live: async (p: any) => {
+      try {
+        const { data, meta } = unwrapSdk(await managerClient().seating.vehicles.manager.link({ tripRef: p.tripRef, vehicleId: p.vehicleId, managerRef: p.managerRef }));
+        return okLive(data, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  'seating.managerUnlink': {
+    lane: 'D', view: 'seat',
+    note: 'The vehicle keeps its occupants — unlinking only clears the manager pointer, it shows no manager until re-linked.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' },
+      { n: 'vehicleId', l: 'vehicleId', k: 'sel', d: (r: any) => { const s = c.ensureSeat(r); return s ? s.vehicles.map((v: any) => v.id) : ['veh_bus2']; } }
+    ],
+    req: (p: any) => ['DELETE', '/api/v1/trips/' + p.tripRef + '/seating/vehicles/' + p.vehicleId + '/manager', null],
+    snip: (p: any) => `await client.seating.vehicles.manager.unlink({ tripRef: '${p.tripRef}', vehicleId: '${p.vehicleId}', version: vehicle.version });`,
+    run: (p: any) => {
+      const s = c.ensureSeat(p.tripRef); if (!s) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const veh = s.vehicles.find((v: any) => v.id === p.vehicleId);
+      if (!veh) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No vehicle with that id on this trip.');
+      veh.managerRef = null; veh.managerId = null; veh.version += 1;
+      return c.ok({ vehicleId: veh.id, managerId: null, linked: false, demotedVehicleId: null, version: veh.version });
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data: board } = unwrapSdk(await mc.seating.read({ tripRef: p.tripRef }));
+        const current = (board.vehicles || []).find((v: any) => !isTombstone(v as any) && (v as any).id === p.vehicleId) as any;
+        if (!current) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No vehicle with that id on this trip.');
+        const { data, meta } = unwrapSdk(await mc.seating.vehicles.manager.unlink({ tripRef: p.tripRef, vehicleId: p.vehicleId, version: current.version }));
+        return okLive(data, meta);
       } catch (e: any) { return toFail(e); }
     }
   },

@@ -106,5 +106,69 @@ export const shareSpecs = (c: any) => ({
         return toFail(err);
       }
     }
+  },
+  'share.patch': {
+    lane: 'B', view: 'share',
+    note: 'config.sections, if sent, REPLACES the whole map — a partial PATCH is not a partial write. Requires the token’s real version as If-Match; a stale one and a missing one answer the identical 409 CONFLICT_VERSION.',
+    p: [{ n: 'token', l: 'token', k: 'sel', d: () => c.sim.share.map((s: any) => s.token) }, { n: 'subject', l: 'new subject (replaces sections)', k: 'sel', v: 'ROOMING_VIEW', o: ['TRAVELLER_ITINERARY', 'ROOMING_VIEW', 'PICKUP_VIEW'] }],
+    req: (p: any) => {
+      const entry = (c.sim.share || []).find((s: any) => s.token === p.token);
+      return ['PATCH', '/api/v1/share-tokens/' + (entry?.id ?? '<mint one first>'), { config: { sections: sectionsForSubject(p.subject) } }];
+    },
+    snip: (p: any) => `await kaafil.shareTokens.patch({\n  id, version,   // read from a prior share.read\n  config: { sections: ${JSON.stringify(sectionsForSubject(p.subject))} },\n});`,
+    run: (p: any) => {
+      const s = c.sim.share.find((x: any) => x.token === p.token);
+      if (!s) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No share token matches.');
+      s.version = (s.version || 1) + 1;
+      s.subject = p.subject;
+      return c.ok({ subject: s.subject, tripRef: s.tripRef, status: s.status, expiresAt: s.expiresAt, version: s.version });
+    },
+    live: async (p: any) => {
+      try {
+        const entry = (c.sim.share || []).find((s: any) => s.token === p.token);
+        if (!entry?.id) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No share token matches — mint one with share.create (or session.share) first, in THIS Connected session, so its real id is on hand.');
+        entry.version = entry.version || 1;
+        const body = await sdkCall(['shareTokens', 'patch'], { id: entry.id, version: entry.version, config: { sections: sectionsForSubject(p.subject) } });
+        const { data, meta } = okFromSdk(body);
+        const d = data as { status: string; expiresAt: string; version: number };
+        entry.subject = p.subject;
+        entry.version = d.version;
+        return { data: { subject: p.subject, tripRef: entry.tripRef, status: d.status, expiresAt: d.expiresAt, version: d.version }, meta };
+      } catch (err) {
+        return toFail(err);
+      }
+    }
+  },
+  'share.regenerate': {
+    lane: 'B', view: 'share',
+    note: 'Mints a fresh token for the same subject, superseding the old one. By default the old token is revoked in the same transaction; keepOld retains it instead.',
+    p: [{ n: 'token', l: 'token', k: 'sel', d: () => c.sim.share.map((s: any) => s.token) }, { n: 'keepOld', l: 'keep old token valid', k: 'bool', v: false }],
+    req: (p: any) => {
+      const entry = (c.sim.share || []).find((s: any) => s.token === p.token);
+      return ['POST', '/api/v1/share-tokens/' + (entry?.id ?? '<mint one first>') + '/regenerate', { keepOld: !!p.keepOld }];
+    },
+    snip: (p: any) => `const { data } = await kaafil.shareTokens.regenerate({ id, keepOld: ${!!p.keepOld} });\n// wrap data.token in YOUR OWN link, same as shareTokens.create`,
+    run: (p: any) => {
+      const s = c.sim.share.find((x: any) => x.token === p.token);
+      if (!s) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No share token matches.');
+      if (!p.keepOld) s.status = 'REVOKED';
+      const fresh = { token: 'kf_shr_' + Math.random().toString(36).slice(2, 14), subject: s.subject, tripRef: s.tripRef, expiresAt: s.expiresAt, status: 'ACTIVE' };
+      c.sim.share.unshift(fresh);
+      return c.ok({ ...fresh, oldStatus: p.keepOld ? 'ACTIVE (kept)' : 'REVOKED' });
+    },
+    live: async (p: any) => {
+      try {
+        const entry = (c.sim.share || []).find((s: any) => s.token === p.token);
+        if (!entry?.id) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No share token matches — mint one with share.create (or session.share) first, in THIS Connected session, so its real id is on hand.');
+        const body = await sdkCall(['shareTokens', 'regenerate'], { id: entry.id, keepOld: !!p.keepOld });
+        const { data, meta } = okFromSdk(body);
+        const d = data as { token: string; id: string; status: string; expiresAt: string };
+        if (!p.keepOld) entry.status = 'REVOKED';
+        c.sim.share.unshift({ token: d.token, id: d.id, subject: entry.subject, tripRef: entry.tripRef, status: d.status });
+        return { data: { token: d.token, subject: entry.subject, tripRef: entry.tripRef, expiresAt: d.expiresAt, oldStatus: p.keepOld ? 'ACTIVE (kept)' : 'REVOKED' }, meta };
+      } catch (err) {
+        return toFail(err);
+      }
+    }
   }
 });

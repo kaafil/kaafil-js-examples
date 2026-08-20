@@ -8,7 +8,7 @@
 // See `../live/lane.ts` and `GAPS.md §5`.
 import { isTombstone } from 'kaafil-js/client';
 import { managerClient, sdkCall } from '../live/transport';
-import { okLive, toFail, unwrapSdk } from '../live/lane';
+import { okFromSdk, okLive, toFail, unwrapSdk } from '../live/lane';
 
 export const events = (c: any) => ({
   lane: 'B', view: 'events',
@@ -167,6 +167,69 @@ export const redeliver = (c: any) => ({
   }
 });
 
+// `webhooks.replay` (this job) — `POST /api/v1/webhooks/endpoints/{id}/replay`,
+// re-delivers every event since `from` to one endpoint. `apiKeyAuth`-only
+// per this file's own header comment ("the delivery-facing operations …
+// and replayEndpoint are API-key") — lane B via `sdkCall()`, same as
+// `events`/`deliv`/`redeliver` above. NOTE for the registry/allowlist step:
+// `backend/server.ts`'s `ALLOWLISTED_SDK_PATHS` carries
+// `webhooks.deliveries.list/read/redeliver` but not yet `webhooks.replay` —
+// this card's `live()` will 403 with `SDK_PATH_NOT_ALLOWLISTED` until that
+// Set is updated, same as any other newly-wired method.
+export const replay = (c: any) => ({
+  lane: 'B', view: 'events',
+  note: 'A replay re-sends every event since from to ONE endpoint — it does not create new events, only new delivery attempts for ones that already happened. Compare deliveries.redeliver, which retries a single already-recorded delivery.',
+  p: [
+    { n: 'endpointId', l: 'endpointId', k: 'sel', d: () => c.sim.events[0] ? [c.sim.events[0].endpointId || 'whe_default'] : ['whe_default'] },
+    { n: 'from', l: 'from (ISO timestamp)', k: 'text', v: new Date(Date.now() - 24 * 3600 * 1000).toISOString() },
+  ],
+  errs: [{ l: 'unknown endpointId → 404', patch: { endpointId: 'whe_does_not_exist' } }],
+  req: (p: any) => ['POST', '/api/v1/webhooks/endpoints/' + p.endpointId + '/replay', { from: p.from }],
+  snip: (p: any) => `const { data } = await kaafil.webhooks.replay({\n  endpointId: '${p.endpointId}', from: '${p.from}',\n});\n// data.queued: how many deliveries this replay enqueued`,
+  run: (p: any) => {
+    if (String(p.endpointId || '').includes('does_not_exist'))
+      return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No webhook endpoint with that id.');
+    const since = new Date(p.from).getTime();
+    const queued = c.sim.events.filter((e: any) => e.firstAt >= since).length;
+    return c.ok({ endpointId: p.endpointId, from: p.from, queued, distinctEvents: c.sim.events.length });
+  },
+  live: async (p: any) => {
+    try {
+      const body = await sdkCall(['webhooks', 'replay'], { endpointId: p.endpointId, from: p.from });
+      return okFromSdk(body);
+    } catch (err) {
+      return toFail(err);
+    }
+  }
+});
+
+// `webhooks.deliveries.read` (this job) — `GET /api/v1/webhooks/deliveries/
+// {id}`, the single-delivery detail `deliv`'s list rows summarize. Delivery-
+// facing per this file's own header ("the delivery-facing operations …
+// are API-key") — lane B via `sdkCall()`, same as `deliv`/`redeliver` above.
+// Already allowlisted on `backend/server.ts` (`'webhooks.deliveries.read'`).
+export const delivRead = (c: any) => ({
+  lane: 'B', view: 'events',
+  note: 'The full detail row one deliveries.list entry only summarizes — status history, attempt count, and the payload actually sent.',
+  p: [{ n: 'deliveryId', l: 'deliveryId', k: 'sel', d: (r: any) => c.sim.events.flatMap((e: any) => e.deliveries.map((d: any) => d.id)) }],
+  req: (p: any) => ['GET', '/api/v1/webhooks/deliveries/' + p.deliveryId, null],
+  snip: (p: any) => `const { data } = await kaafil.webhooks.deliveries.read({ id: '${p.deliveryId}' });`,
+  run: (p: any) => {
+    const ev = c.sim.events.find((e: any) => e.deliveries.some((d: any) => d.id === p.deliveryId));
+    if (!ev) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No delivery with that id — run a burst first so there is something to read.');
+    const d = ev.deliveries.find((x: any) => x.id === p.deliveryId);
+    return c.ok({ id: d.id, endpointId: ev.endpointId || 'whe_default', eventId: ev.eventId, eventType: ev.type, status: d.status === 200 ? 'DELIVERED' : 'FAILED', attempts: d.attempt, nextAttemptAt: null, lastStatusCode: d.status });
+  },
+  live: async (p: any) => {
+    try {
+      const body = await sdkCall(['webhooks', 'deliveries', 'read'], { id: p.deliveryId });
+      return okFromSdk(body);
+    } catch (err) {
+      return toFail(err);
+    }
+  }
+});
+
 // Reconciled to the dominant spec-file convention (named `xxxSpecs` export
 // producing the fully-keyed 'webhooks.*' record) — the individual per-method
 // exports above are untouched (bodies byte-identical); this merely wraps them.
@@ -174,5 +237,7 @@ export const webhooksSpecs = (c: any) => ({
   'webhooks.events': events(c),
   'webhooks.burst': burst(c),
   'webhooks.deliv': deliv(c),
-  'webhooks.redeliver': redeliver(c)
+  'webhooks.delivRead': delivRead(c),
+  'webhooks.redeliver': redeliver(c),
+  'webhooks.replay': replay(c)
 });

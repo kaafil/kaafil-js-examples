@@ -123,5 +123,32 @@ export const treksSpecs = (c: any) => ({
         }, meta);
       } catch (e: any) { return toFail(e); }
     }
+  },
+
+  // --- treks.walkIns.meta (this job) --------------------------------------
+  //
+  // `readTrekWalkInMeta` accepts `managerAuth` OR `apiKeyAuth` per this
+  // file's own header ("board and walkIns.meta accept a manager session OR
+  // an API key") — shown on the manager (lane D) side, same convention
+  // `treks.board` already takes for its own multi-scheme read.
+  'treks.walkinMeta': {
+    lane: 'D', view: 'trek',
+    note: 'The open pickup points a walk-in may be assigned to, plus field hints for the intake form — read this before showing treks.walkin’s form, the same order the real intake screen would.',
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'trekRef', l: 'trekRef', k: 'sel', v: 'active', o: ['active', 'trk_literal_id'] }],
+    req: (p: any) => ['GET', '/api/v1/treks/' + p.trekRef + '/walk-ins/meta', null],
+    snip: (p: any) => `const { data } = await kaafil.treks.walkIns.meta({ tripRef, trekRef: ACTIVE_TREK_REF });`,
+    run: (p: any) => {
+      const t = c.sim.trips[p.tripRef]; if (!t) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      if (t.eventType !== 'TREK') return c.fail('KaafilApiError', 'NOT_A_TREK', 422, 'Walk-in intake exists on treks only — this trip’s eventType is ' + t.eventType + '.', { eventType: t.eventType });
+      const k = c.ensurePick(p.tripRef);
+      return c.ok({ openStops: (k ? k.stops : []).filter((s: any) => s.status === 'OPEN').map((s: any) => ({ id: s.id, name: s.name })), fields: { fullName: { required: true }, phone: { required: false } } });
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data, meta } = unwrapSdk(await mc.treks.walkIns.meta({ trekRef: p.trekRef }));
+        return okLive(data, meta);
+      } catch (e: any) { return toFail(e); }
+    }
   }
 });

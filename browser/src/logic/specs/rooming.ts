@@ -67,7 +67,7 @@ export const roomingSpecs = (c: any) => ({
     run: (p: any) => {
       const b = c.ensureRoom(p.tripRef); if (!b) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
       const cap = Math.max(1, Math.min(8, Number(p.capacity)));
-      const room = { id: 'rm_' + (++c.sim.seq), code: p.code, roomType: p.roomType, capacity: cap, status: 'OPEN', beds: 'ABCDEFGH'.slice(0, cap).split('').map((bedLabel: string) => ({ bedLabel, occupant: null })) };
+      const room = { id: 'rm_' + (++c.sim.seq), stayWindowId: (b.stayWindows[0] && b.stayWindows[0].id) || null, code: p.code, roomType: p.roomType, capacity: cap, status: 'OPEN', version: 1, beds: 'ABCDEFGH'.slice(0, cap).split('').map((bedLabel: string) => ({ bedLabel, occupant: null })) };
       b.rooms.push(room);
       return c.ok(room);
     },
@@ -110,6 +110,208 @@ export const roomingSpecs = (c: any) => ({
         const mc = managerClient();
         const { data, meta } = unwrapSdk(await mc.rooming.assign({ tripRef: p.tripRef, travellerId: p.travellerId, roomId: p.roomId, bedLabel: p.bedLabel }));
         return okLive({ travellerId: data.travellerId, roomId: data.roomId, bedLabel: data.bedLabel, assignSource: 'MANUAL', displacedTravellerId: data.displacedTravellerId, rooms: data.rooms }, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  // --- rooming.rooms.patch / rooming.rooms.remove (this pass) -------------
+  //
+  // Both need the room's real `version` for `If-Match`, the same guard
+  // `itinerary.patch`/`itinerary.remove` already model: the UI's param bag
+  // never carries a `version` field, so `live()` resolves it from a fresh
+  // `rooming.read` immediately before the write, exactly as those two do.
+  'rooming.roomPatch': {
+    lane: 'D', view: 'room',
+    note: 'Beds are synthesised from capacity, never stored, so the capacity check is label-based, not count-based: dropping a 4-bed room to 2 with occupants in A and D still names D an orphan even though the COUNT of survivors (2) matches. stayWindowId is deliberately not patchable — moving a room between windows would carry its beds into a different night.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' },
+      { n: 'roomId', l: 'roomId', k: 'sel', d: (r: any) => { const b = c.ensureRoom(r); return b ? b.rooms.map((x: any) => x.id) : ['rm_101']; } },
+      { n: 'code', l: 'new code (blank = unchanged)', k: 'text', v: '' },
+      { n: 'capacity', l: 'new capacity (blank = unchanged)', k: 'text', v: '' }
+    ],
+    errs: [{ l: 'capacity drop orphans a bed → 422', patch: { roomId: 'rm_101', capacity: '1' } }],
+    req: (p: any) => ['PATCH', '/api/v1/trips/' + p.tripRef + '/rooming/rooms/' + p.roomId, { ...(p.code ? { code: p.code } : {}), ...(String(p.capacity).trim() !== '' ? { capacity: Number(p.capacity) } : {}) }],
+    snip: (p: any) => `await client.rooming.rooms.patch({\n  tripRef: '${p.tripRef}', roomId: '${p.roomId}',\n  ${p.code ? `code: '${p.code}', ` : ''}${String(p.capacity).trim() !== '' ? `capacity: ${p.capacity}, ` : ''}version: room.version,   // version guard, not a timestamp\n});`,
+    run: (p: any) => {
+      const b = c.ensureRoom(p.tripRef); if (!b) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const room = b.rooms.find((x: any) => x.id === p.roomId);
+      if (!room) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No room with that id on this trip.');
+      if (String(p.capacity).trim() !== '') {
+        const cap = Math.max(1, Number(p.capacity));
+        const keep = 'ABCDEFGH'.slice(0, cap).split('');
+        const orphans = room.beds.filter((x: any) => x.occupant && !keep.includes(x.bedLabel)).map((x: any) => x.bedLabel);
+        if (orphans.length)
+          return c.fail('KaafilApiError', 'BUSINESS_RULE_VIOLATION', 422, 'Dropping capacity to ' + cap + ' would orphan bed(s) ' + orphans.join(', ') + ' — refused rather than silently evicting whoever holds them.', { rule: 'room_capacity_below_occupancy', occupants: orphans.length, capacity: cap, orphans });
+        room.capacity = cap;
+        room.beds = keep.map((bedLabel: string) => room.beds.find((x: any) => x.bedLabel === bedLabel) || { bedLabel, occupant: null });
+      }
+      if (p.code) room.code = p.code;
+      room.version += 1;
+      return c.ok(room);
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data: board } = unwrapSdk(await mc.rooming.read({ tripRef: p.tripRef }));
+        const current = (board.rooms || []).find((r: any) => !isTombstone(r as any) && (r as any).id === p.roomId) as any;
+        if (!current) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No room with that id on this trip.');
+        const { data, meta } = unwrapSdk(await mc.rooming.rooms.patch({
+          tripRef: p.tripRef, roomId: p.roomId, version: current.version,
+          ...(p.code ? { code: p.code } : {}),
+          ...(String(p.capacity).trim() !== '' ? { capacity: Number(p.capacity) } : {}),
+        }));
+        return okLive(data, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  'rooming.roomRemove': {
+    lane: 'D', view: 'room',
+    note: 'A room with occupied beds is refused (422 BUSINESS_RULE_VIOLATION, details.rule "room_has_occupants") unless force=true, which clears those beds back to unassigned in the same transaction and reports releasedBeds — turning people out of their beds is never a side effect of a delete that did not ask for it.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' },
+      { n: 'roomId', l: 'roomId', k: 'sel', d: (r: any) => { const b = c.ensureRoom(r); return b ? b.rooms.map((x: any) => x.id) : ['rm_101']; } },
+      { n: 'force', l: 'force', k: 'bool', v: false }
+    ],
+    errs: [{ l: 'occupied room, no force → 422', patch: { roomId: 'rm_101', force: false } }],
+    req: (p: any) => ['DELETE', '/api/v1/trips/' + p.tripRef + '/rooming/rooms/' + p.roomId + (p.force ? '?force=true' : ''), null],
+    snip: (p: any) => `await client.rooming.rooms.remove({ tripRef: '${p.tripRef}', roomId: '${p.roomId}', version: room.version, force: ${!!p.force} });`,
+    run: (p: any) => {
+      const b = c.ensureRoom(p.tripRef); if (!b) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const room = b.rooms.find((x: any) => x.id === p.roomId);
+      if (!room) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No room with that id on this trip.');
+      const occupants = room.beds.filter((x: any) => x.occupant).length;
+      if (occupants > 0 && !p.force)
+        return c.fail('KaafilApiError', 'BUSINESS_RULE_VIOLATION', 422, 'This room still has occupied beds — pass force to release them and delete anyway.', { rule: 'room_has_occupants', occupants });
+      if (occupants > 0) room.beds.forEach((x: any) => { if (x.occupant) { b.unassigned.push({ ...x.occupant, assignSource: null }); x.occupant = null; } });
+      b.rooms = b.rooms.filter((x: any) => x.id !== room.id);
+      return c.ok({ id: room.id, deleted: true, releasedBeds: occupants, roomsDeleted: 0 });
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data: board } = unwrapSdk(await mc.rooming.read({ tripRef: p.tripRef }));
+        const current = (board.rooms || []).find((r: any) => !isTombstone(r as any) && (r as any).id === p.roomId) as any;
+        if (!current) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No room with that id on this trip.');
+        const { data, meta } = unwrapSdk(await mc.rooming.rooms.remove({ tripRef: p.tripRef, roomId: p.roomId, version: current.version, force: !!p.force }));
+        return okLive(data, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  // --- rooming.stayWindows.list (this job) --------------------------------
+  //
+  // `listRoomingStayWindows` is multi-scheme (`managerAuth`/`agencyAdminAuth`/
+  // `apiKeyAuth` per this file's own header) but shown here on the manager
+  // (lane D) side — same convention `rooming.read` already takes for its own
+  // multi-scheme read.
+  'rooming.windowList': {
+    lane: 'D', view: 'room',
+    note: 'Every live stay window on this trip, or, with a cursor, the delta since a prior read — same shape rooming.stayWindows returns embedded in rooming.read, as its own endpoint.',
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }],
+    req: (p: any) => ['GET', '/api/v1/trips/' + p.tripRef + '/rooming/stay-windows', null],
+    snip: (p: any) => `const { data } = await kaafil.rooming.stayWindows.list({ tripRef: '${p.tripRef}' });`,
+    run: (p: any) => {
+      const b = c.ensureRoom(p.tripRef); if (!b) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      return c.ok(b.stayWindows);
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data, meta } = unwrapSdk(await mc.rooming.stayWindows.list({ tripRef: p.tripRef }));
+        const windows = (data || []).filter((w: any) => !isTombstone(w as any));
+        return okLive(windows, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  // --- rooming.stayWindows.create / .patch / .remove (this pass) ----------
+  'rooming.windowCreate': {
+    lane: 'D', view: 'room',
+    note: 'sourceSegmentRef comes back null — this is FRD SOURCE 3, a manager splitting the default whole-trip window, never the CRM-owned segment diff. endDate must be strictly after startDate; either boundary outside the trip’s own window (in the trip’s own timezone) is 422 OUT_OF_TRIP_WINDOW, not a silent clamp.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' },
+      { n: 'label', l: 'label', k: 'text', v: 'Hotel Blue Sea, Goa' },
+      { n: 'startDate', l: 'startDate', k: 'text', v: '2026-09-10T12:00:00Z' },
+      { n: 'endDate', l: 'endDate', k: 'text', v: '2026-09-12T10:00:00Z' }
+    ],
+    errs: [{ l: 'endDate before startDate → 422', patch: { startDate: '2026-09-12T10:00:00Z', endDate: '2026-09-10T12:00:00Z' } }],
+    req: (p: any) => ['POST', '/api/v1/trips/' + p.tripRef + '/rooming/stay-windows', { label: p.label, startDate: p.startDate, endDate: p.endDate }],
+    snip: (p: any) => `await client.rooming.stayWindows.create({\n  tripRef: '${p.tripRef}', label: '${p.label}',\n  startDate: '${p.startDate}', endDate: '${p.endDate}',\n});`,
+    run: (p: any) => {
+      const b = c.ensureRoom(p.tripRef); if (!b) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const start = Date.parse(p.startDate), end = Date.parse(p.endDate);
+      if (!(end > start))
+        return c.fail('KaafilValidationError', 'OUT_OF_TRIP_WINDOW', 422, 'endDate must be strictly after startDate.', { window: { startDate: p.startDate, endDate: p.endDate } });
+      const win = { id: 'win_' + (++c.sim.seq), label: p.label, startDate: p.startDate, endDate: p.endDate, sortOrder: b.stayWindows.length, sourceSegmentRef: null, sourceUpdatedAt: null, version: 1 };
+      b.stayWindows.push(win);
+      return c.ok(win);
+    },
+    live: async (p: any) => {
+      try {
+        const { data, meta } = unwrapSdk(await managerClient().rooming.stayWindows.create({ tripRef: p.tripRef, label: p.label, startDate: p.startDate, endDate: p.endDate }));
+        return okLive(data, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  'rooming.windowPatch': {
+    lane: 'D', view: 'room',
+    note: 'Editing a segment-sourced window is allowed and leaves sourceSegmentRef/sourceUpdatedAt untouched — that is what lets the next CRM push still compare against the ORIGINAL stamp rather than one a manager edit just bumped.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' },
+      { n: 'windowId', l: 'windowId', k: 'sel', d: (r: any) => { const b = c.ensureRoom(r); return b ? b.stayWindows.map((w: any) => w.id) : ['win_101']; } },
+      { n: 'label', l: 'new label (blank = unchanged)', k: 'text', v: 'Hotel Blue Sea, Goa (updated)' }
+    ],
+    req: (p: any) => ['PATCH', '/api/v1/trips/' + p.tripRef + '/rooming/stay-windows/' + p.windowId, { ...(p.label ? { label: p.label } : {}) }],
+    snip: (p: any) => `await client.rooming.stayWindows.patch({\n  tripRef: '${p.tripRef}', windowId: '${p.windowId}',\n  ${p.label ? `label: '${p.label}', ` : ''}version: window.version,   // version guard, not a timestamp\n});`,
+    run: (p: any) => {
+      const b = c.ensureRoom(p.tripRef); if (!b) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const win = b.stayWindows.find((w: any) => w.id === p.windowId);
+      if (!win) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No stay window with that id on this trip.');
+      if (p.label) win.label = p.label;
+      win.version += 1;
+      return c.ok(win);
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data: windows } = unwrapSdk(await mc.rooming.stayWindows.list({ tripRef: p.tripRef }));
+        const current = (windows || []).find((w: any) => !isTombstone(w as any) && (w as any).id === p.windowId) as any;
+        if (!current) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No stay window with that id on this trip.');
+        const { data, meta } = unwrapSdk(await mc.rooming.stayWindows.patch({ tripRef: p.tripRef, windowId: p.windowId, version: current.version, ...(p.label ? { label: p.label } : {}) }));
+        return okLive(data, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+  'rooming.windowRemove': {
+    lane: 'D', view: 'room',
+    note: 'A window that still has beds is refused (422 BUSINESS_RULE_VIOLATION, details.rule "stay_window_has_assignments") unless force=true, which clears the beds, soft-deletes its rooms AND the window in one transaction and reports both releasedBeds and roomsDeleted.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' },
+      { n: 'windowId', l: 'windowId', k: 'sel', d: (r: any) => { const b = c.ensureRoom(r); return b ? b.stayWindows.map((w: any) => w.id) : ['win_101']; } },
+      { n: 'force', l: 'force', k: 'bool', v: false }
+    ],
+    errs: [{ l: 'occupied window, no force → 422', patch: { windowId: 'win_101', force: false } }],
+    req: (p: any) => ['DELETE', '/api/v1/trips/' + p.tripRef + '/rooming/stay-windows/' + p.windowId + (p.force ? '?force=true' : ''), null],
+    snip: (p: any) => `await client.rooming.stayWindows.remove({ tripRef: '${p.tripRef}', windowId: '${p.windowId}', version: window.version, force: ${!!p.force} });`,
+    run: (p: any) => {
+      const b = c.ensureRoom(p.tripRef); if (!b) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const win = b.stayWindows.find((w: any) => w.id === p.windowId);
+      if (!win) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No stay window with that id on this trip.');
+      const roomsHere = b.rooms.filter((r: any) => r.stayWindowId === win.id);
+      const occupants = roomsHere.reduce((n: number, r: any) => n + r.beds.filter((x: any) => x.occupant).length, 0);
+      if (occupants > 0 && !p.force)
+        return c.fail('KaafilApiError', 'BUSINESS_RULE_VIOLATION', 422, 'This window still has rooms with occupants — pass force to release the beds and delete anyway.', { rule: 'stay_window_has_assignments', occupants, rooms: roomsHere.length });
+      if (occupants > 0) roomsHere.forEach((r: any) => r.beds.forEach((x: any) => { if (x.occupant) { b.unassigned.push({ ...x.occupant, assignSource: null }); x.occupant = null; } }));
+      const roomsDeleted = roomsHere.length;
+      b.rooms = b.rooms.filter((r: any) => r.stayWindowId !== win.id);
+      b.stayWindows = b.stayWindows.filter((w: any) => w.id !== win.id);
+      return c.ok({ id: win.id, deleted: true, releasedBeds: occupants, roomsDeleted });
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data: windows } = unwrapSdk(await mc.rooming.stayWindows.list({ tripRef: p.tripRef }));
+        const current = (windows || []).find((w: any) => !isTombstone(w as any) && (w as any).id === p.windowId) as any;
+        if (!current) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No stay window with that id on this trip.');
+        const { data, meta } = unwrapSdk(await mc.rooming.stayWindows.remove({ tripRef: p.tripRef, windowId: p.windowId, version: current.version, force: !!p.force }));
+        return okLive(data, meta);
       } catch (e: any) { return toFail(e); }
     }
   },

@@ -25,6 +25,18 @@ import { entitlementSpecs } from './specs/entitlement';
 import { errorsSpecs } from './specs/errors';
 import { offlineSpecs } from './specs/offline';
 import { closeoutSpecs } from './specs/closeout';
+import { formsSpecs } from './specs/forms';
+// The seven screens the parallel additions left with a spec file, a METHODS
+// block and a sim fixture, but no entry in this record (and none in nav.ts /
+// titles.ts / kickers below) — a spec that is never spread here is a screen
+// whose every card answers `NotWiredYet` from `exec()`. Consolidated in.
+import { agenciesSpecs } from './specs/agencies';
+import { agencyAdminsSpecs } from './specs/agency-admins';
+import { travellersSpecs } from './specs/travellers';
+import { commsSpecs } from './specs/comms';
+import { bookingsSpecs } from './specs/bookings';
+import { feedbackNpsSpecs } from './specs/feedback-nps';
+import { testSpecs } from './specs/test';
 
 import { guides as buildGuides } from './guides';
 import { TOUR as TOUR_DATA, tourGo, guideVals } from './tour';
@@ -149,7 +161,15 @@ export class PlaygroundLogic extends DCLogic<any, PlaygroundLogicProps> {
     ...entitlementSpecs(this),
     ...errorsSpecs(this),
     ...offlineSpecs(this),
-    ...closeoutSpecs(this)
+    ...closeoutSpecs(this),
+    ...formsSpecs(this),
+    ...agenciesSpecs(this),
+    ...agencyAdminsSpecs(this),
+    ...travellersSpecs(this),
+    ...commsSpecs(this),
+    ...bookingsSpecs(this),
+    ...feedbackNpsSpecs(this),
+    ...testSpecs(this)
   };
 
   // design line 1546 (`guides = {...}`), ported to guides.ts
@@ -180,9 +200,11 @@ export class PlaygroundLogic extends DCLogic<any, PlaygroundLogicProps> {
     itinerary: "PHASE 2 · MANAGER'S DAY", rooming: "PHASE 2 · MANAGER'S DAY",
     seating: 'PHASE 3 · BOARDING DAY', pickups: 'PHASE 3 · BOARDING DAY', treks: 'PHASE 3 · BOARDING DAY',
     collections: 'PHASE 4 · MONEY ON THE GROUND', expenses: 'PHASE 4 · MONEY ON THE GROUND', float: 'PHASE 4 · MONEY ON THE GROUND',
-    checklists: 'PHASE 5 · CLOSE-OUT', files: 'PHASE 5 · CLOSE-OUT', vendors: 'PHASE 5 · CLOSE-OUT', webhooks: 'PHASE 5 · CLOSE-OUT',
-    share: 'PHASE 6 · TRAVELLER',
-    errors: 'CROSS-CUTTING', offline: 'CROSS-CUTTING', entitlement: 'CROSS-CUTTING', notbuilt: 'CROSS-CUTTING',
+    agencies: 'PHASE 0 · AGENCY SETUP', agencyAdmins: 'PHASE 0 · AGENCY SETUP', comms: 'PHASE 0 · AGENCY SETUP',
+    travellers: 'PHASE 1 · CRM SETUP', bookings: 'PHASE 1 · CRM SETUP',
+    checklists: 'PHASE 5 · CLOSE-OUT', closeout: 'PHASE 5 · CLOSE-OUT', files: 'PHASE 5 · CLOSE-OUT', vendors: 'PHASE 5 · CLOSE-OUT', webhooks: 'PHASE 5 · CLOSE-OUT', forms: 'PHASE 5 · CLOSE-OUT',
+    share: 'PHASE 6 · TRAVELLER', feedbackNps: 'PHASE 6 · TRAVELLER',
+    errors: 'CROSS-CUTTING', offline: 'CROSS-CUTTING', entitlement: 'CROSS-CUTTING', test: 'CROSS-CUTTING', notbuilt: 'CROSS-CUTTING',
     'guide-run': 'START HERE', 'guide-map': 'START HERE', 'guide-trouble': 'START HERE', tour: 'START HERE'
   };
 

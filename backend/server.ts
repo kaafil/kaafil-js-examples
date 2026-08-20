@@ -137,24 +137,51 @@ const ALLOWLISTED_SDK_PATHS: ReadonlySet<string> = new Set([
   'trips.managers.unassign',
   'trips.balance.push',
   'trips.bulk.push',
+  // Parties + the trip-manager roster (this pass). Every one of these is
+  // multi-scheme in the vendored spec (apiKeyAuth among them), and the
+  // playground drives them on the API-key side per `vendors.list`'s
+  // precedent — see `browser/src/logic/methods.ts`'s `trips` block.
+  'trips.parties.list',
+  'trips.parties.add',
+  'trips.parties.patch',
+  'trips.parties.remove',
+  'trips.managers.list',
+  'trips.managers.patch',
 
   'journey.get',
   'journey.capabilities',
   'journey.waitUntilReady',
   'journey.triggers.list',
+  // Journey rebuild/step-run and the trigger patch (this pass) — all three
+  // apiKeyAuth-reachable per `kaafil-js/src/generated/security.ts`'s
+  // `OPERATION_SECURITY` (`patchJourneyTrigger` also accepts agencyAdminAuth).
+  'journey.rebuild',
+  'journey.runStep',
+  'journey.triggers.patch',
 
   'vendors.list',
 
   'shareTokens.create',
   'shareTokens.read',
   'shareTokens.revoke',
+  // The two share-token lifecycle operations Phase 12 shipped — apiKeyAuth-only.
+  'shareTokens.patch',
+  'shareTokens.regenerate',
 
   'checklists.read',
   'checklists.templates.list',
+  // The agency-level template library `checklists.templates.pull` pulls FROM
+  // (`/api/v1/agencies/{ref}/checklist-templates`) — apiKeyAuth + agencyAdminAuth.
+  'checklists.agencyTemplates.list',
+  'checklists.agencyTemplates.create',
+  'checklists.agencyTemplates.patch',
+  'checklists.agencyTemplates.remove',
 
   'webhooks.deliveries.list',
   'webhooks.deliveries.read',
   'webhooks.deliveries.redeliver',
+  // `replayWebhookEndpoint` (this pass) — apiKeyAuth-only.
+  'webhooks.replay',
 
   'events.listPage',
 
@@ -195,6 +222,130 @@ const ALLOWLISTED_SDK_PATHS: ReadonlySet<string> = new Set([
   // locked trip is a back-office decision, not the locking manager's.
   'closeout.get',
   'closeout.unlock',
+
+  // `agencies.*` (this pass). `upsert` (`PUT /api/v1/agencies/{ref}`) is
+  // apiKeyAuth-only — the same ingest credential `trips.upsert` uses, and NOT
+  // a contradiction of boundary B2 (there is still no `POST /api/v1/agencies`).
+  // `managers.listPage` is the manual single-page escape hatch under the
+  // `managers.list` paginator; multi-scheme, driven on the API-key side per
+  // `vendors.list`'s precedent.
+  'agencies.upsert',
+  'agencies.managers.listPage',
+
+  // `agencyAdmins.*` (this pass) — apiKeyAuth-only, dual-mode identity, LWW.
+  // Closes GAPS.md's `agency-admin-upsert-no-sdk-method`.
+  'agencyAdmins.upsert',
+
+  // `travellers.*` (this pass). `erase`/`export_` are the two DPDP routes and
+  // declare apiKeyAuth as their ONLY accepted scheme — no manager or
+  // agency-admin session can ever reach them. `listForTrip`/`listForAgency`/
+  // `listForAgencyPage` are multi-scheme reads driven on the API-key side per
+  // `vendors.list`'s precedent. Verified against
+  // `kaafil-js/src/resources/travellers.ts` (`export_` carries the trailing
+  // underscore because `export` is a reserved word — the dotted path here must
+  // match the SDK property, not the operationId).
+  'travellers.erase',
+  'travellers.export_',
+  'travellers.listForTrip',
+  'travellers.listForAgency',
+  'travellers.listForAgencyPage',
+
+  // `comms.*` (this pass) — the CRM/agency-admin messaging configuration
+  // surface. Every operation is apiKeyAuth-only per
+  // `kaafil-js/src/resources/comms.ts`, so `/sdk` is the only path the
+  // playground has to any of them. Note `comms.sendTestMessage` is the
+  // apiKeyAuth operation on `/api/v1/comms/test-message`; its consoleAuth twin
+  // on `/api/v1/console/comms/test-message` is a SEPARATE operation and is
+  // deliberately not reachable from here.
+  'comms.config.readDefault',
+  'comms.config.read',
+  'comms.config.put',
+  'comms.providers.create',
+  'comms.providers.test',
+  'comms.messages.listPage',
+  'comms.messages.send',
+  'comms.templates.create',
+  'comms.templates.patch',
+  'comms.sendTestMessage',
+
+  // `bookings.*` (this pass). `list` is multi-scheme (apiKeyAuth +
+  // managerAuth); `bulkUpsert`/`delete`/`vouchers.replace` are
+  // apiKeyAuth-ONLY (CRM-backend ingest). All four verified against
+  // `kaafil-js/src/resources/bookings.ts`.
+  'bookings.list',
+  'bookings.bulkUpsert',
+  'bookings.delete',
+  'bookings.vouchers.replace',
+
+  // `feedbackNps.*` (this pass). Read-only rollups; `agency` accepts
+  // apiKeyAuth + agencyAdminAuth, `trip` additionally accepts managerAuth.
+  // Verified against `kaafil-js/src/resources/feedback-nps.ts`.
+  'feedbackNps.agency',
+  'feedbackNps.trip',
+
+  // `test.*` (this pass) — the sandbox toolkit (kaafil-js/src/resources/
+  // test.ts): simulated clock, fixture rebuilds, sandbox tenant quota. All
+  // five are apiKeyAuth. Every one also throws `TestEnvironmentRequiredError`
+  // INSIDE this process's own `kaafil.test.*` call if `KAAFIL_API_KEY`
+  // resolves to the LIVE plane (`assertTestEnvironment()` in that module) —
+  // that guard runs regardless of this allowlist, so listing these paths
+  // here only decides whether `/sdk` will forward the call at all, never
+  // which plane it is allowed to succeed against.
+  'test.advanceTime',
+  'test.clock',
+  'test.resetClock',
+  'test.fixtures',
+  'test.quota',
+
+  // `forms.*` (this pass) — the agency-authoring lifecycle, sections/fields
+  // CRUD, aggregate/responses/export/consent-receipt, and the trip-scoped
+  // dispatch/answers surface (`kaafil-js/src/resources/forms.ts`). Several of
+  // the trip-scoped operations below (`trip.list`/`trip.answers`/
+  // `trip.completion`/`trip.dispatch`/`trip.responses.list`) also accept
+  // managerAuth in the vendored spec, same as `feedbackNps.trip` above — they
+  // are allowlisted here regardless, because `forms` has no browser-entry
+  // wiring at all (`kaafil-js/src/client-entry.ts`'s own header) and this
+  // `/sdk` dispatcher is the ONLY path the playground has to reach any of
+  // them. Every path below verified against `kaafil-js/src/resources/
+  // forms.ts`'s own property nesting (`sections`/`fields`/`responses`/
+  // `bindings`/`trip`/`trip.responses`).
+  'forms.create',
+  'forms.list',
+  'forms.get',
+  'forms.patch',
+  'forms.delete',
+  'forms.archive',
+  'forms.unarchive',
+  'forms.publish',
+  'forms.close',
+  'forms.reopen',
+  'forms.clone',
+  'forms.reorder',
+  'forms.sections.create',
+  'forms.sections.patch',
+  'forms.sections.delete',
+  'forms.fields.create',
+  'forms.fields.patch',
+  'forms.fields.delete',
+  'forms.aggregate',
+  'forms.responses.get',
+  'forms.responses.export',
+  'forms.responses.consentReceipt',
+  'forms.bindings.list',
+  'forms.trip.list',
+  'forms.trip.answers',
+  'forms.trip.completion',
+  'forms.trip.dispatch',
+  'forms.trip.responses.create',
+  'forms.trip.responses.list',
+
+  // `sync.digest` (this pass) — closes `sync-digest-not-on-server-entry` in
+  // GAPS.md. `GET /api/v1/sync/digest` (`syncDigest`) is `['apiKeyAuth']` per
+  // `kaafil-js/src/generated/security.ts`, and `kaafil-js/src/client.ts`'s
+  // `Kaafil` (this file's own `kaafil` instance) now wires `createSyncResource`
+  // onto `.sync`, so this resolves to a real callable method instead of
+  // tripping `callAllowlistedSdkPath`'s own "does not resolve" 500.
+  'sync.digest',
 ]);
 
 class SdkPathNotAllowlistedError extends Error {

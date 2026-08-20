@@ -6,9 +6,18 @@ export const GROUPS = [
     { id: 'guide-map', label: 'What the 48 steps prove' },
     { id: 'guide-trouble', label: 'Troubleshooting' },
     { id: 'tour', label: 'Guided tour', badge: 'tour' } ] },
+  // PHASE 0 (this consolidation pass) — the agency-level surfaces that exist
+  // BEFORE any trip does. All three are apiKeyAuth-only screens; see
+  // `./methods.ts`'s `agencies`/`agencyAdmins`/`comms` blocks.
+  { label: 'PHASE 0 · AGENCY SETUP', items: [
+    { id: 'agencies', label: 'Agencies', cred: 'key' },
+    { id: 'agencyAdmins', label: 'Agency admins', cred: 'key' },
+    { id: 'comms', label: 'Messaging & comms', cred: 'key' } ] },
   { label: 'PHASE 1 · CRM SETUP', items: [
     { id: 'session', label: 'Session & auth', cred: 'both' },
     { id: 'trips', label: 'Trips', cred: 'key' },
+    { id: 'travellers', label: 'Travellers & DPDP', cred: 'key' },
+    { id: 'bookings', label: 'Bookings', cred: 'key' },
     { id: 'journey', label: 'Journey', cred: 'key' } ] },
   { label: "PHASE 2 · MANAGER'S DAY", items: [
     { id: 'itinerary', label: 'Itinerary', cred: 'mgr' },
@@ -26,12 +35,15 @@ export const GROUPS = [
     { id: 'closeout', label: 'Closing day', cred: 'mgr' },
     { id: 'files', label: 'Files & receipts', cred: 'mgr' },
     { id: 'vendors', label: 'Vendors', cred: 'key' },
-    { id: 'webhooks', label: 'Webhooks & events', cred: 'key' } ] },
+    { id: 'webhooks', label: 'Webhooks & events', cred: 'key' },
+    { id: 'forms', label: 'Forms', cred: 'key' } ] },
   { label: 'PHASE 6 · TRAVELLER', items: [
-    { id: 'share', label: 'Share links', cred: 'key' } ] },
+    { id: 'share', label: 'Share links', cred: 'key' },
+    { id: 'feedbackNps', label: 'Feedback & NPS', cred: 'key' } ] },
   { label: 'CROSS-CUTTING', items: [
     { id: 'entitlement', label: 'Plans & entitlement', cred: 'key' },
     { id: 'errors', label: 'Errors & retryability' },
     { id: 'offline', label: 'Offline & delta sync' },
+    { id: 'test', label: 'Sandbox & test clock', cred: 'key' },
     { id: 'notbuilt', label: 'Not built yet' } ] }
 ];
