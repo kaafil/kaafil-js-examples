@@ -213,7 +213,7 @@ export const agencyTplList = (c: any) => ({
   note: 'The agency’s full template library, across every locale. Starts empty — agencyTplCreate populates it for real, not a canned fixture.',
   p: [],
   req: () => ['GET', '/api/v1/agencies/{ref}/checklist-templates', null],
-  snip: () => `const { data } = await kaafil.checklists.agencyTemplates.list({ agencyRef });`,
+  snip: () => `const { data } = await kaafil.checklists.agencyTemplates.list({});\n// agencyRef is auto-bound from the open session — it is no longer a parameter this method accepts`,
   run: () => c.ok({ templates: c.sim.agencyTpl || [] }),
   live: async () => {
     try {
@@ -232,7 +232,7 @@ export const agencyTplCreate = (c: any) => ({
     { n: 'phase', l: 'phase', k: 'sel', v: 'PRE_DEPARTURE', o: ['PRE_DEPARTURE', 'IN_TRIP', 'POST_TRIP'] }
   ],
   req: (p: any) => ['POST', '/api/v1/agencies/{ref}/checklist-templates', { key: p.key, title: p.title, phase: p.phase }],
-  snip: (p: any) => `const { data } = await kaafil.checklists.agencyTemplates.create({\n  agencyRef, key: '${p.key}', title: '${p.title}', phase: '${p.phase}',\n});`,
+  snip: (p: any) => `const { data } = await kaafil.checklists.agencyTemplates.create({\n  key: '${p.key}', title: '${p.title}', phase: '${p.phase}',   // agencyRef is auto-bound from the open session\n});`,
   run: (p: any) => {
     c.sim.agencyTpl = c.sim.agencyTpl || [];
     const id = 'tpl_' + (++c.sim.seq);
@@ -256,7 +256,7 @@ export const agencyTplPatch = (c: any) => ({
     { n: 'title', l: 'new title', k: 'text', v: 'Pre-departure documents (v2)' }
   ],
   req: (p: any) => ['PATCH', '/api/v1/agencies/{ref}/checklist-templates/' + p.templateId, { title: p.title }],
-  snip: (p: any) => `await kaafil.checklists.agencyTemplates.patch({\n  agencyRef, templateId: '${p.templateId}', title: '${p.title}', version,\n});`,
+  snip: (p: any) => `await kaafil.checklists.agencyTemplates.patch({\n  templateId: '${p.templateId}', title: '${p.title}', version,   // agencyRef is auto-bound from the open session\n});`,
   run: (p: any) => {
     const t = (c.sim.agencyTpl || []).find((x: any) => x.id === p.templateId);
     if (!t) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No agency template with that id.');
@@ -282,7 +282,7 @@ export const agencyTplRemove = (c: any) => ({
   note: 'Retires the template. Needs the same real version as agencyTplPatch for If-Match.',
   p: [{ n: 'templateId', l: 'templateId', k: 'sel', d: () => (c.sim.agencyTpl || []).map((t: any) => t.id) }],
   req: (p: any) => ['DELETE', '/api/v1/agencies/{ref}/checklist-templates/' + p.templateId, null],
-  snip: (p: any) => `await kaafil.checklists.agencyTemplates.remove({ agencyRef, templateId: '${p.templateId}', version });`,
+  snip: (p: any) => `await kaafil.checklists.agencyTemplates.remove({ templateId: '${p.templateId}', version });\n// agencyRef is auto-bound from the open session`,
   run: (p: any) => {
     const list = c.sim.agencyTpl || [];
     const idx = list.findIndex((x: any) => x.id === p.templateId);

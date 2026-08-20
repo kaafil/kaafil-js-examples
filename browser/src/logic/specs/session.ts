@@ -77,7 +77,7 @@ export const sessionSpecs = (c: any) => ({
     note: 'Rotation from here is automatic. The only line you write is onRefresh, and its only job is persisting the rotated pair so a reload survives.',
     p: [{ n: 'persist', l: 'persist rotated pair', k: 'bool', v: true }],
     req: () => ['—', 'no request — open() is local until the first call', null],
-    snip: () => `// runs on the MANAGER'S DEVICE — kaafil-js/client has no path to an API key\nconst client = new KaafilClient({ environment: 'test', timeoutMs: 10_000, maxAttempts: 3 });\n\nclient.session.open({\n  accessToken,   // from your backend\n  refreshToken,\n  onRefresh: (r) => sessionStorage.setItem(KEY, JSON.stringify(r)),\n});`,
+    snip: () => `// runs on the MANAGER'S DEVICE — kaafil-js/client has no path to an API key\nconst client = new KaafilClient({ environment: 'test', timeoutMs: 10_000, maxAttempts: 3 });\n\nclient.session.open({\n  agencyRef,     // your agency's externalId — required, auto-bound onto every session-scoped call from here\n  accessToken,   // from your backend\n  refreshToken,\n  onRefresh: (r) => sessionStorage.setItem(KEY, JSON.stringify(r)),\n});`,
     run: () => {
       if (!c.sim.session) return c.fail('KaafilClientNotOpenError', null, null, 'No token pair on this device yet — mint one from your CRM backend first (Session & auth → auth.mintManagerToken).');
       c.sim.session.open = true; c.sim.closed = false;
@@ -162,7 +162,13 @@ export const sessionSpecs = (c: any) => ({
         const s = currentSession();
         if (!s) return c.fail('SessionRequiredError', null, null, 'No manager session minted yet — run session.mint (and session.open) first.');
         const probe = new KaafilClient({ environment: 'test', baseUrl: s.baseUrl });
-        probe.session.open({ accessToken: s.accessToken, refreshToken: s.refreshToken, expiresAt: s.expiresAt });
+        // Built as a variable, not an inline literal — see
+        // `../live/transport.ts`'s `sdkClient()` `openOptions` note for why:
+        // this is what lets `agencyRef` ride along here too without an
+        // excess-property error against either shape of `session.open`'s
+        // options.
+        const openOptions = { agencyRef: s.agencyRef, accessToken: s.accessToken, refreshToken: s.refreshToken, expiresAt: s.expiresAt };
+        probe.session.open(openOptions);
         probe.close();
         // `close()` nulls the client's internal state, so `notifications.list()`
         // throws `KaafilClientNotOpenError` synchronously via its own
@@ -238,7 +244,7 @@ export const sessionSpecs = (c: any) => ({
     note: 'The agency-admin analogue of session.open. Rotation is automatic here too — the only line you write is onRefresh.',
     p: [{ n: 'persist', l: 'persist rotated pair', k: 'bool', v: true }],
     req: () => ['—', 'no request — open() is local until the first call', null],
-    snip: () => `// runs on the AGENCY-ADMIN'S DEVICE — kaafil-js/client has no path to an API key\nconst client = new KaafilClient({ environment: 'test', timeoutMs: 10_000, maxAttempts: 3 });\n\nclient.admin.open({\n  accessToken,   // from your backend\n  refreshToken,\n  onRefresh: (r) => sessionStorage.setItem(KEY, JSON.stringify(r)),\n});`,
+    snip: () => `// runs on the AGENCY-ADMIN'S DEVICE — kaafil-js/client has no path to an API key\nconst client = new KaafilClient({ environment: 'test', timeoutMs: 10_000, maxAttempts: 3 });\n\nclient.admin.open({\n  agencyRef,     // your agency's externalId — required, auto-bound onto every session-scoped call from here\n  accessToken,   // from your backend\n  refreshToken,\n  onRefresh: (r) => sessionStorage.setItem(KEY, JSON.stringify(r)),\n});`,
     run: () => {
       if (!c.sim.adminSession) return c.fail('KaafilClientNotOpenError', null, null, 'No token pair on this device yet — mint one from your CRM backend first (Session & auth → auth.mintAgencyAdminToken).');
       c.sim.adminSession.open = true;

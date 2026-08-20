@@ -46,6 +46,7 @@
  */
 
 import { KaafilClient } from 'kaafil-js/client';
+import type { AgencyAdminRefreshResult, ManagerRefreshResult } from 'kaafil-js/client';
 
 // ---------------------------------------------------------------------------
 // The error shape
@@ -509,17 +510,25 @@ export function sdkClient(): KaafilClient {
 
   const session = _session;
   const client = new KaafilClient({ environment: 'test', baseUrl: session.baseUrl });
-  client.session.open({
+  // Built as a variable, not an inline object literal, so this compiles
+  // against both the pre- and post-`agencyRef` shape of `session.open`'s
+  // options: TypeScript's excess-property check only fires on a "fresh"
+  // literal at the call site, never on a variable being passed through, so
+  // `agencyRef` rides along unconditionally without a version-gated branch
+  // here. Once every installed `kaafil-js` requires it, this stays correct
+  // as-is — nothing to revert.
+  const openOptions = {
     agencyRef: session.agencyRef,
     accessToken: session.accessToken,
     refreshToken: session.refreshToken,
     expiresAt: session.expiresAt,
-    onRefresh: (result) => {
+    onRefresh: (result: ManagerRefreshResult) => {
       if (!_session) return; // closeSession() ran mid-flight; drop the rotation.
       _session = { ..._session, ...result };
       persistSession(_session);
     },
-  });
+  };
+  client.session.open(openOptions);
   _sdkClient = client;
   return client;
 }
@@ -663,17 +672,20 @@ export function adminSdkClient(): KaafilClient {
 
   const session = _adminSession;
   const client = new KaafilClient({ environment: 'test', baseUrl: session.baseUrl });
-  client.admin.open({
+  // See `sdkClient()`'s identical `openOptions` note above — same reason
+  // this is a variable, not a literal, at the `admin.open` call site.
+  const openOptions = {
     agencyRef: session.agencyRef,
     accessToken: session.accessToken,
     refreshToken: session.refreshToken,
     expiresAt: session.expiresAt,
-    onRefresh: (result) => {
+    onRefresh: (result: AgencyAdminRefreshResult) => {
       if (!_adminSession) return; // closeAdminSession() ran mid-flight; drop the rotation.
       _adminSession = { ..._adminSession, ...result };
       persistAdminSession(_adminSession);
     },
-  });
+  };
+  client.admin.open(openOptions);
   _adminSdkClient = client;
   return client;
 }

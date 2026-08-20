@@ -19,26 +19,28 @@
 // screens' `live()` will 403 with `SDK_PATH_NOT_ALLOWLISTED` until that Set
 // is updated, same as any other newly-wired method.
 import { AGENCY_FEEDBACK_FIXTURE, TRIP_FEEDBACK_FIXTURE } from '../sim/feedback-nps';
-import { sdkCall } from '../live/transport';
+import { resolveAgencyRef, sdkCall } from '../live/transport';
 import { okFromSdk, toFail } from '../live/lane';
 
 export const feedbackNpsSpecs = (c: any) => ({
+  // `feedbackNps.agency` no longer accepts `agencyRef` as a parameter at all
+  // as of the `client-entry.ts` session-scoping change — it is auto-bound
+  // from whichever session opened the client. This screen has no
+  // session-level field carrying one, so, same as `agencies.managersPage`
+  // in `./agencies.ts`, `resolveAgencyRef()` reads it for real off
+  // `backend/server.ts`'s own `GET /health` rather than showing a param
+  // this method no longer takes.
   'feedbackNps.agency': {
     lane: 'B',
     note: 'One row per designated feedback form across the agency’s whole forms catalog. The engine wraps the payload in its OWN data property — read response.data.definitions, not response.definitions.',
-    p: [{ n: 'agencyRef', l: 'agencyRef', k: 'text', v: AGENCY_FEEDBACK_FIXTURE.agencyRef }],
-    req: (p: any) => ['GET', '/api/v1/agencies/' + p.agencyRef + '/feedback/summary', null],
-    snip: (p: any) => `const { data } = await kaafil.feedbackNps.agency({ agencyRef: '${p.agencyRef}' });\n// data.data.definitions — the schema nests a second "data" inside the envelope's own.`,
-    run: (p: any) => {
-      if (!String(p.agencyRef || '').trim())
-        return c.fail('KaafilInvalidRequestError', null, null, 'agencyRef must not be blank. Refused locally, before any request.', { field: 'agencyRef', got: p.agencyRef });
-      return c.ok({ data: AGENCY_FEEDBACK_FIXTURE.data });
-    },
-    live: async (p: any) => {
-      if (!String(p.agencyRef || '').trim())
-        return c.fail('KaafilInvalidRequestError', null, null, 'agencyRef must not be blank. Refused locally, before any request.', { field: 'agencyRef', got: p.agencyRef });
+    p: [],
+    req: () => ['GET', '/api/v1/agencies/{agencyRef}/feedback/summary', null],
+    snip: () => `const { data } = await kaafil.feedbackNps.agency({});\n// agencyRef is auto-bound from the open session, but the options object stays required. data.data.definitions — the schema nests a second "data" inside the envelope's own.`,
+    run: () => c.ok({ data: AGENCY_FEEDBACK_FIXTURE.data }),
+    live: async () => {
       try {
-        return okFromSdk(await sdkCall(['feedbackNps', 'agency'], { agencyRef: p.agencyRef }));
+        const agencyRef = await resolveAgencyRef();
+        return okFromSdk(await sdkCall(['feedbackNps', 'agency'], { agencyRef }));
       } catch (err) {
         return toFail(err);
       }
