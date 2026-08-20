@@ -120,6 +120,35 @@ export const journeySpecs = (c: any) => ({
       }
     }
   },
+  // `journey.capsLive` (this job, GAP-003) — `capabilities({ live: true })`,
+  // a query-param addition on `readJourneyCapabilities`, not a new
+  // operation, so it carries the exact same three-scheme accept list
+  // (`apiKeyAuth`/`managerAuth`/`agencyAdminAuth`) as `journey.caps` above —
+  // lane B, same posture. Forces a synchronous recompute against LIVE trip/
+  // entitlement state instead of the last persisted build; never itself
+  // persisted. `journey.rebuild` above is the distinct, deliberately-NOT-
+  // widened async alternative — see this file's header.
+  'journey.capsLive': {
+    lane: 'B', view: 'caps',
+    note: 'live:true forces a synchronous recompute against LIVE trip/entitlement state — never persisted itself. Contrast with journey.rebuild, a full async rebuild that IS persisted and can emit webhooks; this is the read-freshness tool, that is the write tool.',
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }],
+    req: (p: any) => ['GET', '/api/v1/trips/' + p.tripRef + '/journey/capabilities?live=true', null],
+    snip: (p: any) => `const caps = await kaafil.journey.capabilities({ tripRef: '${p.tripRef}', live: true });\n// recomputed synchronously against live state, never persisted`,
+    run: (p: any) => {
+      const t = c.sim.trips[p.tripRef];
+      if (!t) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref on this tenant.');
+      return c.ok(c.capRows(t));
+    },
+    // Same bare-array/no-surviving-`meta` situation as `journey.caps` above.
+    live: async (p: any) => {
+      try {
+        const body = await sdkCall(['journey', 'capabilities'], { tripRef: p.tripRef, live: true });
+        return okLive(body, (body as any)?.meta);
+      } catch (err) {
+        return toFail(err);
+      }
+    }
+  },
   'journey.trig': {
     lane: 'B', note: 'Triggers are the engine’s own automation switches — read them before assuming a stage moved by itself.',
     p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }],

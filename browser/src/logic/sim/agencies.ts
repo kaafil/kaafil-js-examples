@@ -36,3 +36,25 @@ export const AGENCY_MANAGER_DIRECTORY_FIXTURE: readonly {
   { managerId: 'mgr_ops_02', externalManagerId: 'CRM-MGR-02', fullName: 'Arjun Sethi', phone: '+91 98200 44556', availability: null },
   { managerId: 'mgr_ops_03', externalManagerId: null, fullName: 'Divya Krishnan', phone: '+91 98200 77889', availability: null },
 ];
+
+/** Canned Simulated-mode fixture for `agencies.settingsGet`/`.settingsPatch`
+ * (GAP-002) — `GET`/`PATCH /api/v1/agencies/{ref}/settings/self`.
+ * `AgencySettingsResponse.settings` is a free-form document — only the
+ * sections/knobs an agency has explicitly SET appear in it (an absent one
+ * inherits the Kaafil default, and is distinguishable from a chosen one) —
+ * so this fixture shows exactly two of `PatchAgencySettingsSelfRequest`'s
+ * real sections (`rooming.genderPolicy`, `expenses.thresholdMinor`) rather
+ * than inventing fields the contract does not have. `thresholdMinor` is
+ * money as a minor-unit integer, same convention every other amount in
+ * this repo uses. `run()` copies this once into `c.sim.agencySettings` on
+ * first read, the same lazy-seed convention `AGENCY_FIXTURE`'s own header
+ * describes for `c.sim.agencies`. */
+export const AGENCY_SETTINGS_FIXTURE = {
+  agencyRef: AGENCY_FIXTURE.agencyRef,
+  version: 1,
+  settings: {
+    rooming: { genderPolicy: 'STRICT_SEPARATE' as const },
+    expenses: { thresholdMinor: 500000, window: 'TRIP_PLUS_DAYS' as const, windowDays: 7 },
+  },
+  sections: ['rooming', 'expenses', 'pickups', 'checklists', 'forms', 'treks', 'feedback', 'closeout', 'files'],
+} as const;

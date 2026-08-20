@@ -75,7 +75,11 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     // read. See `./specs/journey.ts` for the three new specs.
     ['rebuild', 'journey.rebuild', 'B', 'sdk'],
     ['runStep', 'journey.runStep', 'B', 'sdk'],
-    ['trigPatch', 'triggers.patch', 'B', 'sdk']
+    ['trigPatch', 'triggers.patch', 'B', 'sdk'],
+    // New card (this job, GAP-003): `capabilities({ live: true })` — a
+    // query-param addition on the same three-scheme operation `caps`
+    // already drives, not a new operation. Lane B, same posture.
+    ['capsLive', 'journey.capabilities(live=true)', 'B', 'sdk']
   ],
   itinerary: [
     ['read', 'itinerary.read', 'D', 'sdk'],
@@ -149,7 +153,10 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     ['walkin', 'walkIns.create', 'D', 'sdk'],
     // New card (this job): `readTrekWalkInMeta` is multi-scheme, shown on
     // the manager (lane D) side per `treks.board`'s own precedent.
-    ['walkinMeta', 'walkIns.meta', 'D', 'sdk']
+    ['walkinMeta', 'walkIns.meta', 'D', 'sdk'],
+    // New card (this job, GAP-006): `listTrekWalkIns` is multi-scheme, same
+    // posture as `walkinMeta`/`board` above — lane D.
+    ['walkinList', 'walkIns.list', 'D', 'sdk']
   ],
   checklists: [
     ['read', 'checklists.read', 'D', 'sdk'],
@@ -167,7 +174,10 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     ['agencyTplList', 'agencyTemplates.list', 'B', 'sdk'],
     ['agencyTplCreate', 'agencyTemplates.create', 'B', 'sdk'],
     ['agencyTplPatch', 'agencyTemplates.patch', 'B', 'sdk'],
-    ['agencyTplRemove', 'agencyTemplates.remove', 'B', 'sdk']
+    ['agencyTplRemove', 'agencyTemplates.remove', 'B', 'sdk'],
+    // New card (this job, GAP-004): DRAFT -> PUBLISHED. Same accept pair as
+    // every other agencyTemplates.* method — lane B.
+    ['agencyTplPublish', 'agencyTemplates.publish', 'B', 'sdk']
   ],
   webhooks: [
     ['events', 'events.list', 'B', 'sdk'],
@@ -237,7 +247,15 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     ['url', 'files.url', 'D', 'sdk']
   ],
   vendors: [
-    ['list', 'vendors.list', 'B', 'sdk']
+    ['list', 'vendors.list', 'B', 'sdk'],
+    // Two new cards (this job, GAP-005): the agency's own vendor directory
+    // CRUD. `upsertVendor`/`deleteVendor` accept apiKeyAuth OR
+    // agencyAdminAuth, NEVER managerAuth — lane B, same posture
+    // `checklists.agencyTpl*` already take for the same accept pair.
+    // Previously `no-vendor-ingest-endpoint` in GAPS.md §3 — closed by this
+    // wave; see GAPS.md's "Closed since this audit" note.
+    ['upsert', 'vendors.upsert', 'B', 'sdk'],
+    ['remove', 'vendors.remove', 'B', 'sdk']
   ],
   share: [
     ['create', 'shareTokens.create', 'B', 'sdk'],
@@ -309,7 +327,23 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     // per `vendors.list`'s precedent — the manual single-page escape hatch
     // for `agencies.managers.list`'s paginator. See `./specs/agencies.ts`'s
     // `agencies.managersPage`.
-    ['managersPage', 'agencies.managers.listPage', 'B', 'sdk']
+    ['managersPage', 'agencies.managers.listPage', 'B', 'sdk'],
+    // Two new cards (this job, GAP-002) — the agency's own operational
+    // settings document. `settings.get` (`getAgencySettingsSelf`) accepts
+    // apiKeyAuth OR agencyAdminAuth — lane B, through the backend's API
+    // key. `settings.patch` (`patchAgencySettingsSelf`) is agencyAdminAuth-
+    // ONLY — no apiKey path can ever satisfy it, so lane D: it runs direct
+    // against the engine through an open agency-admin session
+    // (`adminSdkClient()`), the sibling route the engine ships specifically
+    // so a consoleAuth array never has to be widened (see
+    // `./specs/agencies.ts`'s header). Previously boundary `B9` in
+    // GAPS.md §2 ("both consoleAuth, no partner credential satisfies
+    // either") — that described the CONSOLE pair
+    // (getAgencySettings/patchAgencySettings); this is the DISTINCT
+    // partner-facing sibling route this wave added, on a separate path
+    // (`.../settings/self`).
+    ['settingsGet', 'agencies.settings.get', 'B', 'sdk'],
+    ['settingsPatch', 'agencies.settings.patch', 'D', 'sdk']
   ],
   agencyAdmins: [
     // Closes `agency-admin-upsert-no-sdk-method`: `upsertAgencyAdmin` now has a
@@ -338,7 +372,12 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     // side per this screen's own precedent. Both already allowlisted on
     // `backend/server.ts`. See `./specs/travellers.ts`'s own header.
     ['upsert', 'trips.travellers.upsert', 'B', 'sdk'],
-    ['remove', 'trips.travellers.remove', 'B', 'sdk']
+    ['remove', 'trips.travellers.remove', 'B', 'sdk'],
+    // New card (this job, GAP-008): `POST /api/v1/agencies/{ref}/travellers`
+    // (`createTraveller`) — apiKeyAuth OR agencyAdminAuth, never
+    // managerAuth (an agency-directory write, not a trip roster add) — lane
+    // B, same posture `vendors.upsert`/`.remove` take.
+    ['create', 'travellers.create', 'B', 'sdk']
   ],
   comms: [
     ['configDefault', 'comms.config.readDefault', 'B', 'sdk'],

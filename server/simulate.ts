@@ -1490,7 +1490,17 @@ async function main(): Promise<void> {
         // A person, not a token: these writes went through a manager session, so
         // the trail says MANAGER and names them. An API-key write cannot appear
         // here at all, because an on-ground write with an API key is a 401.
-        assertEquals(entry.actorType, 'MANAGER', `${entry.kind} was attributed to ${entry.actorType}`);
+        //
+        // `actorType`/`actorId` were retired: `ItineraryChangeLog` is now
+        // normalized onto the shared actor pair (GAP-001) —
+        // `performedByKind`/`performedById`, the same shape the other eight
+        // actor-pair tables already carry, with `SYSTEM` added to
+        // `ActorKind` alongside `MANAGER`/`AGENCY_ADMIN`/`API_KEY`.
+        assertEquals(
+          entry.performedByKind,
+          'MANAGER',
+          `${entry.kind} was attributed to ${String(entry.performedByKind)}`,
+        );
       }
 
       console.log(`  ${String(entries.length)} entries, newest first:`);
@@ -1682,14 +1692,21 @@ async function main(): Promise<void> {
       if (adminEntry === undefined) {
         throw new AssertionFailure('the API-key itinerary write left no change-log entry');
       }
-      // `ADMIN`, not `MANAGER`. This value already existed in the engine's own
-      // CHECK constraint vocabulary and was unreachable until parity landed, so
-      // an assertion on it is genuinely discriminating: the pre-parity code
-      // hardcoded `MANAGER` for every actor.
-      assertEquals(adminEntry.actorType, 'ADMIN', 'an API-key write was recorded as a MANAGER');
+      // `API_KEY`, never `AGENCY_ADMIN`/`MANAGER`. This is the attribution
+      // fix GAP-001 shipped: the engine's schema is emphatic that an
+      // API-key write is the CRM acting, and recording it as an agency
+      // admin would name a person who did not act — so `performedByKind`
+      // must never collapse `API_KEY` into the admin case. (Retired
+      // `actorType`/`ADMIN` vocabulary — see the change-log entries
+      // assertion above for the full rename.)
+      assertEquals(
+        adminEntry.performedByKind,
+        'API_KEY',
+        `an API-key write was recorded as ${String(adminEntry.performedByKind)}`,
+      );
       console.log(
         `  kaafil.itinerary.items.add with an API key → ${adminWritten.id}, ` +
-          `change log actorType=${adminEntry.actorType}`,
+          `change log performedByKind=${String(adminEntry.performedByKind)}`,
       );
     });
     passed++;

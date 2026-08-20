@@ -108,7 +108,10 @@ export const treksSpecs = (c: any) => ({
       const t = c.sim.trips[p.tripRef]; if (!t) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
       if (t.eventType !== 'TREK') return c.fail('KaafilApiError', 'NOT_A_TREK', 422, 'Walk-ins exist on treks only — this trip’s eventType is ' + t.eventType + '.', { eventType: t.eventType });
       t.roster += 1;
-      return c.ok({ travellerId: 'tvl_walkin_' + (++c.sim.seq), fullName: p.fullName, glyph: p.fullName.split(' ').map((x: string) => x[0]).join('').slice(0, 2).toUpperCase(), tone: 'unknown.4', rosterCount: t.roster });
+      const walkInId = 'tvl_walkin_' + (++c.sim.seq);
+      c.sim.trekWalkIns = c.sim.trekWalkIns || {};
+      c.sim.trekWalkIns[p.tripRef] = [...(c.sim.trekWalkIns[p.tripRef] || []), { id: 'wlk_' + c.sim.seq, travellerId: walkInId, fullName: p.fullName, phone: p.phone || null, needsReconciliation: true, createdAt: c.nowIso() }];
+      return c.ok({ travellerId: walkInId, fullName: p.fullName, glyph: p.fullName.split(' ').map((x: string) => x[0]).join('').slice(0, 2).toUpperCase(), tone: 'unknown.4', rosterCount: t.roster });
     },
     live: async (p: any) => {
       try {
@@ -147,6 +150,39 @@ export const treksSpecs = (c: any) => ({
       try {
         const mc = managerClient();
         const { data, meta } = unwrapSdk(await mc.treks.walkIns.meta({ trekRef: p.trekRef }));
+        return okLive(data, meta);
+      } catch (e: any) { return toFail(e); }
+    }
+  },
+
+  // --- treks.walkIns.list (this job, GAP-006) -----------------------------
+  //
+  // `listTrekWalkIns` accepts the same three alternatives as every other
+  // trek operation in this file (`managerAuth`, `apiKeyAuth`,
+  // `agencyAdminAuth`) — shown on the manager (lane D) side, same
+  // convention `treks.board`/`treks.walkinMeta` already take. Shown here via
+  // the manual `listPage` escape hatch (one call, one page) rather than the
+  // full `KaafilPaginator` — this playground has no "load more" affordance
+  // on this screen, the same choice `agencies.managersPage` made for its
+  // own paginated read.
+  'treks.walkinList': {
+    lane: 'D', view: 'trek',
+    note: 'The sibling read of treks.walkin — one row per recorded walk-in on this trek, cursor-paginated. The active sentinel resolves the same way it does on every other trek method on this screen.',
+    p: [{ n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'trekRef', l: 'trekRef', k: 'sel', v: 'active', o: ['active', 'trk_literal_id'] }, { n: 'limit', l: 'limit', k: 'num', v: 20 }],
+    req: (p: any) => ['GET', '/api/v1/treks/' + p.trekRef + '/walk-ins?limit=' + p.limit, null],
+    snip: (p: any) => `const page = await kaafil.treks.walkIns.listPage({ trekRef: ACTIVE_TREK_REF, limit: ${p.limit} });\n// page.meta.page.hasNext / page.meta.page.cursor drive the next call`,
+    run: (p: any) => {
+      const t = c.sim.trips[p.tripRef]; if (!t) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      if (t.eventType !== 'TREK') return c.fail('KaafilApiError', 'NOT_A_TREK', 422, 'Walk-ins exist on treks only — this trip’s eventType is ' + t.eventType + '.', { eventType: t.eventType });
+      const rows = (c.sim.trekWalkIns && c.sim.trekWalkIns[p.tripRef]) || [];
+      return c.ok(rows.slice(0, Math.max(1, Number(p.limit) || 20)));
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        const { data, meta } = unwrapSdk(
+          await mc.treks.walkIns.listPage({ trekRef: p.trekRef, limit: Number(p.limit) || 20 }),
+        );
         return okLive(data, meta);
       } catch (e: any) { return toFail(e); }
     }

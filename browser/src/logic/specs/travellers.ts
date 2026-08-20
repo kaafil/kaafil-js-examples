@@ -33,6 +33,7 @@ import {
   TRAVELLER_ERASE_CASCADE_TEMPLATE,
   TRIP_MANIFEST_FIXTURE,
 } from '../sim/travellers';
+import { AGENCY_FIXTURE } from '../sim/agencies';
 import { resolveAgencyRef, sdkCall } from '../live/transport';
 import { okFromSdk, okLive, toFail } from '../live/lane';
 
@@ -260,6 +261,64 @@ export const travellersSpecs = (c: any) => ({
           fullName: p.fullName,
           phone: p.phone || undefined,
           sourceUpdatedAt: new Date().toISOString(),
+        });
+        return okFromSdk(body);
+      } catch (err) {
+        return toFail(err);
+      }
+    },
+  },
+
+  // `travellers.create` (this job, GAP-008) — `POST
+  // /api/v1/agencies/{ref}/travellers` (`createTraveller`). Accepts
+  // `apiKeyAuth` OR `agencyAdminAuth`, NEVER `managerAuth` — the agency-wide
+  // directory write, not a trip roster add — so lane B, same posture
+  // `vendors.upsert`/`.remove` take. `externalTravellerId` is optional:
+  // omitted, Kaafil mints the row with `externalId: null`, reconciled later
+  // by phone — the same shape `treks.walkIns.create` already takes.
+  // Allowlisted on `backend/server.ts` as `'travellers.create'`.
+  'travellers.create': {
+    lane: 'B',
+    note: 'externalTravellerId is optional, not required: omit it and Kaafil mints the traveller with externalId null, reconciled later by phone — the same shape treks.walkIns.create already takes. A supplied id that already resolves within the SAME agency returns the EXISTING directory row rather than a conflict.',
+    p: [
+      { n: 'agencyRef', l: 'agencyRef', k: 'text', v: AGENCY_FIXTURE.agencyRef },
+      { n: 'fullName', l: 'fullName', k: 'text', v: 'Neha Verma' },
+      { n: 'phone', l: 'phone (optional)', k: 'text', v: '+91 98200 33445' },
+      { n: 'email', l: 'email (optional)', k: 'text', v: 'neha.verma@example.com' },
+      { n: 'externalTravellerId', l: 'externalTravellerId (optional)', k: 'text', v: '' },
+    ],
+    errs: [{ l: 'blank fullName → refused locally', patch: { fullName: '' } }],
+    req: (p: any) => ['POST', '/api/v1/agencies/' + p.agencyRef + '/travellers', { fullName: p.fullName, phone: p.phone || undefined, email: p.email || undefined, externalTravellerId: p.externalTravellerId || undefined }],
+    snip: (p: any) => `const { data } = await kaafil.travellers.create({\n  agencyRef: '${p.agencyRef}', fullName: '${p.fullName}',\n${p.phone ? `  phone: '${p.phone}',\n` : ''}${p.email ? `  email: '${p.email}',\n` : ''}${p.externalTravellerId ? `  externalTravellerId: '${p.externalTravellerId}',\n` : `  // externalTravellerId omitted — Kaafil mints one as null, reconciled later by phone\n`}});`,
+    run: (p: any) => {
+      if (!String(p.fullName || '').trim())
+        return c.fail('KaafilInvalidRequestError', null, null, 'fullName must not be blank. Refused locally, before any request.', { field: 'fullName', got: p.fullName });
+      c.sim.agencyTravellers = c.sim.agencyTravellers || {};
+      const byExternal = c.sim.agencyTravellers[p.agencyRef] || {};
+      const existing = p.externalTravellerId ? byExternal[p.externalTravellerId] : undefined;
+      if (existing) return c.ok(existing);
+      const row = {
+        travellerId: 'tvl_' + (++c.sim.seq),
+        externalTravellerId: p.externalTravellerId || null,
+        fullName: p.fullName,
+        phone: p.phone || null,
+        email: p.email || null,
+      };
+      if (p.externalTravellerId) {
+        c.sim.agencyTravellers[p.agencyRef] = { ...byExternal, [p.externalTravellerId]: row };
+      }
+      return c.ok(row);
+    },
+    live: async (p: any) => {
+      if (!String(p.fullName || '').trim())
+        return c.fail('KaafilInvalidRequestError', null, null, 'fullName must not be blank. Refused locally, before any request.', { field: 'fullName', got: p.fullName });
+      try {
+        const body = await sdkCall(['travellers', 'create'], {
+          agencyRef: p.agencyRef,
+          fullName: p.fullName,
+          ...(p.phone ? { phone: p.phone } : {}),
+          ...(p.email ? { email: p.email } : {}),
+          ...(p.externalTravellerId ? { externalTravellerId: p.externalTravellerId } : {}),
         });
         return okFromSdk(body);
       } catch (err) {

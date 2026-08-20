@@ -236,7 +236,7 @@ export const agencyTplCreate = (c: any) => ({
   run: (p: any) => {
     c.sim.agencyTpl = c.sim.agencyTpl || [];
     const id = 'tpl_' + (++c.sim.seq);
-    const row = { id, key: p.key, locale: 'en', title: p.title, phase: p.phase, audience: 'INTERNAL', version: 1, items: [] };
+    const row = { id, key: p.key, locale: 'en', title: p.title, phase: p.phase, audience: 'INTERNAL', version: 1, items: [], status: 'DRAFT' };
     c.sim.agencyTpl.push(row);
     return c.ok(row);
   },
@@ -301,6 +301,32 @@ export const agencyTplRemove = (c: any) => ({
   }
 });
 
+// `agencyTplPublish` (this job, GAP-004) — the DRAFT -> PUBLISHED transition.
+// Bodiless, no `If-Match`. A DRAFT template is invisible to `templates.list`/
+// `templates.pull` (the trip-facing surface); only `agencyTemplates.list`
+// (the authoring library, above) shows both. Same accept pair as every
+// other `agencyTemplates.*` method — apiKeyAuth OR agencyAdminAuth, never
+// managerAuth — so lane B.
+export const agencyTplPublish = (c: any) => ({
+  lane: 'B', view: 'chk',
+  note: 'A new agencyTplCreate starts DRAFT and is invisible to the trip-facing checklists.tpl/checklists.pull until this flips it to PUBLISHED. Bodiless — no If-Match.',
+  p: [{ n: 'templateId', l: 'templateId', k: 'sel', d: () => (c.sim.agencyTpl || []).map((t: any) => t.id) }],
+  req: (p: any) => ['POST', '/api/v1/agencies/{ref}/checklist-templates/' + p.templateId + '/publish', {}],
+  snip: (p: any) => `await kaafil.checklists.agencyTemplates.publish({ templateId: '${p.templateId}' });\n// agencyRef is auto-bound from the open session — status flips DRAFT -> PUBLISHED`,
+  run: (p: any) => {
+    const t = (c.sim.agencyTpl || []).find((x: any) => x.id === p.templateId);
+    if (!t) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No agency template with that id.');
+    t.status = 'PUBLISHED';
+    return c.ok(t);
+  },
+  live: async (p: any) => {
+    try {
+      const agencyRef = await resolveAgencyRef();
+      return okFromSdk(await sdkCall(['checklists', 'agencyTemplates', 'publish'], { agencyRef, templateId: p.templateId }));
+    } catch (e) { return toFail(e); }
+  }
+});
+
 // Reconciled to the dominant spec-file convention (named `xxxSpecs` export
 // producing the fully-keyed 'checklists.*' record) — the individual per-method
 // exports above are untouched (bodies byte-identical); this merely wraps them.
@@ -315,5 +341,6 @@ export const checklistsSpecs = (c: any) => ({
   'checklists.agencyTplList': agencyTplList(c),
   'checklists.agencyTplCreate': agencyTplCreate(c),
   'checklists.agencyTplPatch': agencyTplPatch(c),
-  'checklists.agencyTplRemove': agencyTplRemove(c)
+  'checklists.agencyTplRemove': agencyTplRemove(c),
+  'checklists.agencyTplPublish': agencyTplPublish(c)
 });

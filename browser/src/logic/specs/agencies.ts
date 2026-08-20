@@ -19,8 +19,8 @@
 // upsert'` — this screen's `live()` will 403 with `SDK_PATH_NOT_
 // ALLOWLISTED` until that Set is updated, same as any other newly-wired
 // method.
-import { AGENCY_FIXTURE, AGENCY_MANAGER_DIRECTORY_FIXTURE } from '../sim/agencies';
-import { resolveAgencyRef, sdkCall } from '../live/transport';
+import { AGENCY_FIXTURE, AGENCY_MANAGER_DIRECTORY_FIXTURE, AGENCY_SETTINGS_FIXTURE } from '../sim/agencies';
+import { resolveAgencyRef, sdkCall, adminSdkClient } from '../live/transport';
 import { okFromSdk, okLive, toFail } from '../live/lane';
 
 export const agenciesSpecs = (c: any) => ({
@@ -118,6 +118,86 @@ export const agenciesSpecs = (c: any) => ({
           limit: Number(p.limit) || 50,
         });
         return okLive(items, (items as any)?.meta);
+      } catch (err) {
+        return toFail(err);
+      }
+    },
+  },
+
+  // `agencies.settingsGet` (this job, GAP-002) — `GET
+  // /api/v1/agencies/{ref}/settings/self` (`getAgencySettingsSelf`). Accepts
+  // `apiKeyAuth` OR `agencyAdminAuth` — the API key reads its own agency's
+  // operational knobs — so lane B, through `sdkCall()` same as every other
+  // lane-B card on this screen. Allowlisted on `backend/server.ts` as
+  // `'agencies.settings.get'`.
+  'agencies.settingsGet': {
+    lane: 'B',
+    note: 'settings is the STORED document only — a section or knob this agency never set is simply absent (inheriting the Kaafil default), never merged in and defaulted here. sections lists every name this engine recognises, for rendering an editor even where the agency has set nothing yet. The sibling of the console\'s own GET .../settings — a SEPARATE route, never a widened consoleAuth array (pipeline() throws at import time if consoleAuth ever joined a multi-scheme set, because a cookie is ambient).',
+    p: [{ n: 'agencyRef', l: 'agencyRef', k: 'text', v: AGENCY_FIXTURE.agencyRef }],
+    req: (p: any) => ['GET', '/api/v1/agencies/' + p.agencyRef + '/settings/self', null],
+    snip: (p: any) => `const { data } = await kaafil.agencies.settings.get({ agencyRef: '${p.agencyRef}' });\n// data.settings holds only the sections this agency has explicitly set`,
+    run: (p: any) => {
+      c.sim.agencySettings = c.sim.agencySettings || { ...AGENCY_SETTINGS_FIXTURE, agencyRef: p.agencyRef };
+      return c.ok(c.sim.agencySettings);
+    },
+    live: async (p: any) => {
+      try {
+        const body = await sdkCall(['agencies', 'settings', 'get'], { agencyRef: p.agencyRef });
+        return okFromSdk(body);
+      } catch (err) {
+        return toFail(err);
+      }
+    },
+  },
+
+  // `agencies.settingsPatch` (this job, GAP-002) — `PATCH
+  // /api/v1/agencies/{ref}/settings/self` (`patchAgencySettingsSelf`) is
+  // `agencyAdminAuth`-ONLY, per `kaafil-js/src/resources/agencies.ts`'s own
+  // header — no apiKeyAuth path can ever satisfy it. `backend/server.ts`'s
+  // `/sdk` dispatcher holds only an API key, so this card cannot run through
+  // it at all; it goes DIRECT to the engine through `adminSdkClient()`, lane
+  // D, the same "the manager/admin lane bypasses the backend" shape
+  // `../specs/treks.ts`'s `managerClient()` calls already take (R6). An
+  // agency-admin session must be open first (`session.adminOpen`). This
+  // card edits two of the request's real sections — `rooming.genderPolicy`
+  // and `expenses.thresholdMinor` — rather than a smaller set of invented
+  // fields; every other `PatchAgencySettingsSelfRequest` section
+  // (`pickups`, `checklists`, `forms`, `treks`, `feedback`, `closeout`,
+  // `files`) is untouched by this card, exactly as a real PATCH that omits
+  // them would leave those sections alone.
+  'agencies.settingsPatch': {
+    lane: 'D',
+    note: 'agencyAdminAuth-only — an API key can read this document (settingsGet) but never write it. version is required, not optional: read it off a fresh settingsGet first, the same read-then-write shape every other version-guarded write in this repo uses. Sending a section here REPLACES that whole section, never merges field-by-field within it.',
+    p: [
+      { n: 'genderPolicy', l: 'rooming.genderPolicy', k: 'sel', v: 'STRICT_SEPARATE', o: ['STRICT_SEPARATE', 'GROUP_MIXED_OK', 'OFF'] },
+      { n: 'thresholdMinor', l: 'expenses.thresholdMinor (paise)', k: 'num', v: AGENCY_SETTINGS_FIXTURE.settings.expenses.thresholdMinor },
+      { n: 'version', l: 'version (If-Match)', k: 'num', v: 1 },
+    ],
+    req: (p: any) => ['PATCH', '/api/v1/agencies/{agencyRef}/settings/self', { rooming: { genderPolicy: p.genderPolicy }, expenses: { thresholdMinor: Number(p.thresholdMinor) } }],
+    snip: (p: any) => `// runs on the AGENCY-ADMIN'S DEVICE via admin.open() — never the API key\nconst { data } = await client.agencies.settings.patch({\n  rooming: { genderPolicy: '${p.genderPolicy}' },\n  expenses: { thresholdMinor: ${p.thresholdMinor} },   // minor-unit integer, e.g. paise\n  version: ${p.version},   // If-Match — required, agencyRef is auto-bound from the open session\n});`,
+    run: (p: any) => {
+      c.sim.agencySettings = c.sim.agencySettings || { ...AGENCY_SETTINGS_FIXTURE };
+      if (Number(p.version) !== c.sim.agencySettings.version)
+        return c.fail('KaafilVersionConflictError', 'CONFLICT_VERSION', 409, 'Stale If-Match.', { currentVersion: c.sim.agencySettings.version });
+      c.sim.agencySettings = {
+        ...c.sim.agencySettings,
+        settings: {
+          ...c.sim.agencySettings.settings,
+          rooming: { genderPolicy: p.genderPolicy },
+          expenses: { ...c.sim.agencySettings.settings.expenses, thresholdMinor: Number(p.thresholdMinor) },
+        },
+        version: c.sim.agencySettings.version + 1,
+      };
+      return c.ok(c.sim.agencySettings);
+    },
+    live: async (p: any) => {
+      try {
+        const client = adminSdkClient();
+        return await client.agencies.settings.patch({
+          rooming: { genderPolicy: p.genderPolicy },
+          expenses: { thresholdMinor: Number(p.thresholdMinor) },
+          version: Number(p.version),
+        });
       } catch (err) {
         return toFail(err);
       }
