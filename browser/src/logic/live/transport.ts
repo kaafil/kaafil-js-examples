@@ -316,6 +316,7 @@ export interface MintSessionInput {
  * (`session.rotate`/`session.probe`'s own params), not here. */
 export interface LiveSession {
   readonly managerRef: string;
+  readonly agencyRef: string;
   readonly accessToken: string;
   readonly refreshToken: string;
   readonly expiresAt: string;
@@ -399,8 +400,16 @@ export async function mintSession(input: MintSessionInput): Promise<LiveSession 
       retryable: 'no',
     });
   }
+  // `session.open()` (below, in `sdkClient()`) now REQUIRES `agencyRef` —
+  // resolved here, at mint time, off the same `GET /health` route
+  // `resolveAgencyRef()` already reads `KAAFIL_AGENCY_REF` from (see that
+  // function's header), so it rides on the session object as something
+  // this file already has by the time a client is opened, never a second
+  // fetch at open time.
+  const agencyRef = await resolveAgencyRef();
   const session: LiveSession = {
     managerRef: input.managerRef,
+    agencyRef,
     accessToken: payload.accessToken,
     refreshToken: payload.refreshToken,
     expiresAt: new Date(Date.now() + (payload.expiresIn ?? 0) * 1000).toISOString(),
@@ -501,6 +510,7 @@ export function sdkClient(): KaafilClient {
   const session = _session;
   const client = new KaafilClient({ environment: 'test', baseUrl: session.baseUrl });
   client.session.open({
+    agencyRef: session.agencyRef,
     accessToken: session.accessToken,
     refreshToken: session.refreshToken,
     expiresAt: session.expiresAt,
@@ -533,6 +543,7 @@ export interface MintAgencyAdminSessionInput {
  * `MintAgencyAdminTokensRequest`, which carries only `agencyAdminRef`). */
 export interface LiveAdminSession {
   readonly agencyAdminRef: string;
+  readonly agencyRef: string;
   readonly accessToken: string;
   readonly refreshToken: string;
   readonly expiresAt: string;
@@ -606,8 +617,13 @@ export async function mintAgencyAdminSession(
       retryable: 'no',
     });
   }
+  // `admin.open()` (below, in `adminSdkClient()`) now REQUIRES `agencyRef` —
+  // resolved here, at mint time, the same way `mintSession` resolves it for
+  // the manager lane above.
+  const agencyRef = await resolveAgencyRef();
   const session: LiveAdminSession = {
     agencyAdminRef: input.agencyAdminRef,
+    agencyRef,
     accessToken: payload.accessToken,
     refreshToken: payload.refreshToken,
     expiresAt: new Date(Date.now() + (payload.expiresIn ?? 0) * 1000).toISOString(),
@@ -648,6 +664,7 @@ export function adminSdkClient(): KaafilClient {
   const session = _adminSession;
   const client = new KaafilClient({ environment: 'test', baseUrl: session.baseUrl });
   client.admin.open({
+    agencyRef: session.agencyRef,
     accessToken: session.accessToken,
     refreshToken: session.refreshToken,
     expiresAt: session.expiresAt,
