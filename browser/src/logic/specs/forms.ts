@@ -7,28 +7,31 @@
 // share-surface list/read/save/submit" — those four traveller-share-token
 // ops belong to `./share.ts`'s screen, not this one).
 //
-// ── EVERY OPERATION HERE IS LANE B, AND HERE IS WHY THAT IS NOT A GUESS ─────
+// ── EVERY OPERATION HERE IS LANE B, AND HERE IS WHY THAT IS STILL TRUE ──────
 // `kaafil-js/src/resources/forms.ts`'s own header states some trip-scoped
 // reads (`trip.list`/`trip.answers`/`trip.completion`/`trip.dispatch`/
 // `trip.responses.list`) accept `managerAuth` in the vendored spec — verified
 // against `kaafil-js/src/generated/security.ts`'s `OPERATION_SECURITY`, which
-// is genuinely true. But accepting a scheme and being REACHABLE from this
-// playground's manager-lane client are two different facts: `forms` is one
-// of the four groups `kaafil-js/src/client-entry.ts`'s own header names as
-// deliberately NOT wired into the browser entry ("the server-only groups
-// (`auth`, `shareTokens`, `webhooks`, `events`, `forms`, `bookings`,
-// `feedbackNps`, `comms`) declare `apiKeyAuth` as their only accepted scheme
-// for every operation" — a simplification for that file's own boundary
-// story, but the wiring FACT it states is accurate: grepping `client-entry.
-// ts` for `forms:` turns up nothing beyond the unrelated `share.forms.*`
-// traveller-share surface). `managerClient()` in `../live/transport.ts`
-// therefore has no `.forms` property to call at all — every method here
-// necessarily goes through `sdkCall()`, the API-key lane proxied through
-// `backend/server.ts`'s `/sdk` dispatcher, same convention `./comms.ts`/
-// `./agencies.ts` already use for their own apiKeyAuth-reachable-only
-// screens. This mirrors `./methods.ts`'s existing `bookings`/`feedbackNps`
-// blocks, which take the identical "multi-scheme in the spec, lane B because
-// nothing else can reach it here" posture for the same reason.
+// is genuinely true. `kaafil-js/src/client-entry.ts` used to name `forms`
+// (alongside `bookings`/`feedbackNps`) as one of the groups wrongly assumed
+// server-only and NOT wired into the browser entry at all — that claim is now
+// OUT OF DATE: `client-entry.ts` wires all three, on the same
+// reachable-operations distinction `trips`/`agencies` already sit on there,
+// so `managerClient()`/`adminSdkClient()` in `../live/transport.ts` genuinely
+// have a `.forms` property now, and 28 of these 29 operations are reachable
+// through it for real (only `aggregate` is `apiKeyAuth`-only). That is a fact
+// about the SDK's reachability, not about this screen's lane: `forms` is a
+// module-level authoring/administration resource, not one of the eleven
+// on-ground device screens, so — exactly like `trips`/`agencies` themselves,
+// and like `./bookings.ts`/`./feedback-nps.ts` alongside it — every card here
+// stays shown on the API-key side per `vendors.list`'s precedent, and every
+// `live()` below keeps going through `sdkCall()`, the API-key lane proxied
+// through `backend/server.ts`'s `/sdk` dispatcher, same convention
+// `./comms.ts`/`./agencies.ts` use for their own screens. This mirrors
+// `./methods.ts`'s `bookings`/`feedbackNps`/`forms` blocks, which take the
+// identical "multi-scheme (or now dual-lane-reachable) in the spec, still
+// lane B by this playground's own screen convention" posture for the same
+// reason — see that file's comments for the per-member scheme breakdown.
 //
 // ── SIM STATE ────────────────────────────────────────────────────────────
 // `c.sim.forms` — an array of full `FormDetailResponse`-shaped rows (nested

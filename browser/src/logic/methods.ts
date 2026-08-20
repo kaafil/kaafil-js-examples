@@ -368,6 +368,14 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
   // own header), shown on the API-key side per `vendors.list`'s precedent;
   // `bulkUpsert`/`delete`/`vouchers.replace` are apiKeyAuth-ONLY (CRM-backend
   // ingest, same reason `trips.ts`'s whole module is). All four lane B.
+  // `kaafil-js/src/client-entry.ts` now wires `bookings` onto the browser
+  // entry too (it was wrongly assumed server-only), so `list` is genuinely
+  // reachable from a `managerClient()`-held session as well — that does not
+  // move it to lane D, for the same reason it does not move `trips.parties`/
+  // `agencies.managers.list`: `bookings` is a module-level resource, not one
+  // of the eleven on-ground device screens, so it keeps the `vendors.list`
+  // posture. See `../specs/forms.ts`'s header for the fuller version of this
+  // same note.
   bookings: [
     ['list', 'bookings.list', 'B', 'sdk'],
     ['bulkUpsert', 'bookings.bulkUpsert', 'B', 'sdk'],
@@ -378,7 +386,12 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
   // (`agency` accepts agencyAdminAuth + apiKeyAuth; `trip` additionally
   // accepts managerAuth per `kaafil-js/src/resources/feedback-nps.ts`'s own
   // header) — shown on the API-key side per `vendors.list`'s precedent.
-  // Both lane B.
+  // Both lane B. `kaafil-js/src/client-entry.ts` now wires `feedbackNps` onto
+  // the browser entry too (it was wrongly assumed server-only), so `trip` is
+  // reachable from a `managerClient()`- or `adminSdkClient()`-held session
+  // and `agency` from an `adminSdkClient()`-held one — same non-move-to-D
+  // reasoning as `bookings.list`/`forms` above: a module-level resource, not
+  // an on-ground device screen, keeps the `vendors.list` posture.
   feedbackNps: [
     ['agency', 'feedbackNps.agency', 'B', 'sdk'],
     ['trip', 'feedbackNps.trip', 'B', 'sdk']
@@ -388,15 +401,19 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
   // the trip-scoped reads/writes below (`trip.list`/`trip.answers`/
   // `trip.completion`/`trip.dispatch`/`trip.responses.list`) genuinely accept
   // `managerAuth` per `kaafil-js/src/generated/security.ts`'s own
-  // `OPERATION_SECURITY` table — that is NOT the reason every one of these
-  // sits on lane B. The reason is wiring: `forms` is one of the groups
-  // `kaafil-js/src/client-entry.ts`'s own header names as deliberately absent
-  // from the browser entry (grep `client-entry.ts` for `forms:` — nothing
-  // beyond the unrelated `share.forms.*` traveller-share surface turns up),
-  // so `managerClient()` in `../live/transport.ts` has no `.forms` property
-  // to call at all. Every method here therefore goes through `sdkCall()`,
-  // same posture `feedbackNps.trip` above already takes for the identical
-  // reason. See `../specs/forms.ts`'s own header for the full accounting.
+  // `OPERATION_SECURITY` table, and (per `kaafil-js/src/client-entry.ts`'s own
+  // header) 28 of these 29 operations — every one but `aggregate`, which is
+  // `apiKeyAuth`-only — are now genuinely reachable from a
+  // `managerClient()`/`adminSdkClient()`-held session too: `client-entry.ts`
+  // no longer leaves `forms` off the browser entry (that was a wiring gap,
+  // now closed, alongside `bookings`/`feedbackNps` below). That does not move
+  // any card here to lane D, though: `forms` is a module-level
+  // authoring/administration resource, not one of the eleven on-ground
+  // device screens, so it sits on the same "shown on the API-key side per
+  // `vendors.list`'s precedent" posture `trips`/`agencies` already take for
+  // their own dual-reachable members — every method here keeps going through
+  // `sdkCall()`. See `../specs/forms.ts`'s own header for the full
+  // accounting and the per-member scheme breakdown.
   forms: [
     ['create', 'forms.create', 'B', 'sdk'],
     ['list', 'forms.list', 'B', 'sdk'],
