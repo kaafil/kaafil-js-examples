@@ -62,7 +62,6 @@ import {
   PartyKind,
   resolveBaseUrl,
   TripMode,
-  UnsatisfiableSchemeError,
 } from 'kaafil-js';
 
 // The manager's half of the day (steps 13-21) now goes through `kaafil-js`
@@ -1605,16 +1604,21 @@ async function main(): Promise<void> {
     // the four READ operations accept `apiKeyAuth` — so a CRM backend can poll
     // what its managers did on the ground with the credential it already has,
     // through generated types, with the retry ladder and the typed errors. That
-    // is what this step exercises, and it is the reason steps 13-21 do not use
-    // these groups: THIRTEEN of the seventeen operations are writes, they accept
-    // `managerAuth` and only `managerAuth`, and the API-key client cannot present
-    // one.
+    // is what this step exercises.
     //
-    // The refusal below is the part worth watching. It is thrown by the SDK
-    // BEFORE any request is built — `UnsatisfiableSchemeError`, from the vendored
-    // spec's own per-operation scheme table. The credential boundary is not a
-    // 401 you discover in staging; it is a local type-level fact the SDK can see
-    // and does. (Which is also why the manager-session half of this walkthrough
+    // ⚠️ THIS PARAGRAPH USED TO SAY the opposite, and the change is the point.
+    // Until 2026-08-20 it read: "THIRTEEN of the seventeen operations are
+    // writes, they accept `managerAuth` and only `managerAuth`, and the API-key
+    // client cannot present one" — and the block below watched the SDK refuse
+    // such a write LOCALLY, before any request, with `UnsatisfiableSchemeError`
+    // read from the vendored spec's per-operation scheme table.
+    //
+    // Admin parity landed: those writes now accept `apiKey` and `agencyAdmin`
+    // too, so the local guard correctly stops firing and the write lands. The
+    // SDK's spec-driven refusal mechanism is UNCHANGED and still worth knowing
+    // about — a credential boundary here is a local type-level fact rather than
+    // a 401 discovered in staging — it simply no longer applies to THIS
+    // operation. (Which is also why the manager-session half of this walkthrough
     // still goes through `../on-ground/`: `KaafilClient`, the only entry that can
     // hold a manager session, does not expose these two groups yet. When it does,
     // that directory is deleted and steps 13-21 become ordinary SDK calls.)
@@ -1649,22 +1653,43 @@ async function main(): Promise<void> {
           `${String(board.summary.assignedCount)}/${String(board.summary.rosterCount)} travellers placed`,
       );
 
-      try {
-        await kaafil.itinerary.items.add({
-          tripRef: onGroundTripRef,
-          isoDate: todayCard.isoDate,
-          title: 'Written with the wrong credential',
-        });
-        throw new AssertionFailure('an API-key client was allowed to write an itinerary item');
-      } catch (err) {
-        if (!(err instanceof UnsatisfiableSchemeError)) {
-          throw err;
-        }
-        // No status, no code, no request id — because there was no request. The
-        // SDK knew from the spec that this credential could never satisfy the
-        // operation, and said so instead of spending a round trip to be told.
-        console.log(`  kaafil.itinerary.items.add with an API key → ${err.constructor.name}, offline: ${err.message}`);
+      // ── ADMIN PARITY (2026-08-20) ────────────────────────────────────────
+      //
+      // This block asserted the OPPOSITE until 2026-08-20: an API-key itinerary
+      // write was refused LOCALLY, before any request, with
+      // `UnsatisfiableSchemeError`, because the spec declared the operation
+      // manager-only and the SDK reads the spec. The owner then granted full
+      // admin parity, so the operation now accepts `apiKey`, the SDK's local
+      // guard correctly no longer fires, and the write goes through.
+      //
+      // The assertion MOVED rather than being deleted — deleting it would have
+      // dropped the only consumer-shaped proof that an admin credential can
+      // reach the on-ground surface at all. What it proves now is the half that
+      // is easy to get wrong: the write must be ATTRIBUTED to the admin, never
+      // recorded as the manager whose column the engine used to require. A
+      // widened auth set with an unwidened actor would pass a status-code
+      // assertion perfectly and quietly credit the wrong person.
+      const adminWritten = await kaafil.itinerary.items.add({
+        tripRef: onGroundTripRef,
+        isoDate: todayCard.isoDate,
+        title: 'Added by the CRM on its own API key',
+      });
+      assertTrue(adminWritten.id.length > 0, 'the API-key itinerary write returned no item id');
+
+      const logAfterAdmin = await kaafil.itinerary.changeLog.list({ tripRef: onGroundTripRef });
+      const adminEntry = logAfterAdmin.find((row) => row.itemId === adminWritten.id);
+      if (adminEntry === undefined) {
+        throw new AssertionFailure('the API-key itinerary write left no change-log entry');
       }
+      // `ADMIN`, not `MANAGER`. This value already existed in the engine's own
+      // CHECK constraint vocabulary and was unreachable until parity landed, so
+      // an assertion on it is genuinely discriminating: the pre-parity code
+      // hardcoded `MANAGER` for every actor.
+      assertEquals(adminEntry.actorType, 'ADMIN', 'an API-key write was recorded as a MANAGER');
+      console.log(
+        `  kaafil.itinerary.items.add with an API key → ${adminWritten.id}, ` +
+          `change log actorType=${adminEntry.actorType}`,
+      );
     });
     passed++;
 
@@ -2317,9 +2342,10 @@ async function main(): Promise<void> {
     // extend `on-ground/` for both the writes and (for consistency with
     // steps 13-21) the reads inside the manager's day. Step 40 is where the
     // SDK's real, new surface gets exercised: the CRM reads the same trip
-    // back through `kaafil.checklists.read` on its API key, and the identical
-    // write is refused LOCALLY before any request — `UnsatisfiableSchemeError`
-    // — exactly as step 22 already demonstrates for itinerary.
+    // back through `kaafil.checklists.read` on its API key, and — since admin
+    // parity landed on 2026-08-20 — performs the identical WRITE on that same
+    // key, exactly as step 22 now does for itinerary. Both blocks previously
+    // asserted a local `UnsatisfiableSchemeError` refusal instead.
     // ===================================================================
 
     /** `checklists.constants.ts#CHECKLIST_RESERVED_SECTION_KEYS`, restated here
@@ -2656,17 +2682,23 @@ async function main(): Promise<void> {
         `  kaafil.checklists.read → ${String(read.sections.length)} sections, ${String(read.items.length)} item row(s)`,
       );
 
-      try {
-        await kaafil.checklists.items.toggle({
-          tripRef: checklistTripRef,
-          itemId: toggledPassport.id,
-          expectedStatus: 'COMPLETE',
-        });
-        throw new AssertionFailure('an API-key client was allowed to write a checklist toggle');
-      } catch (err) {
-        if (!(err instanceof UnsatisfiableSchemeError)) throw err;
-        console.log(`  kaafil.checklists.items.toggle with an API key → ${err.constructor.name}, offline: ${err.message}`);
-      }
+      // ── ADMIN PARITY (2026-08-20) — same inversion as step 22 ────────────
+      //
+      // Was a local `UnsatisfiableSchemeError` refusal; the operation now
+      // accepts `apiKey`. `expectedStatus` is a SET-TO-TARGET rather than a
+      // flip (`checklists.validation.ts#toggleChecklistItemSchema`), so
+      // re-asserting COMPLETE on an already-complete item is idempotent and
+      // this step stays re-runnable — which is why the target is spelled out
+      // rather than inferred from the item's current value.
+      const toggledByAdmin = await kaafil.checklists.items.toggle({
+        tripRef: checklistTripRef,
+        itemId: toggledPassport.id,
+        expectedStatus: 'COMPLETE',
+      });
+      assertEquals(toggledByAdmin.item.status, 'COMPLETE', 'the API-key checklist toggle did not land COMPLETE');
+      console.log(
+        `  kaafil.checklists.items.toggle with an API key → ${toggledByAdmin.item.status} (admin parity, 2026-08-20)`,
+      );
     });
     passed++;
 
