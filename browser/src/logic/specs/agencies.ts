@@ -20,7 +20,7 @@
 // ALLOWLISTED` until that Set is updated, same as any other newly-wired
 // method.
 import { AGENCY_FIXTURE, AGENCY_MANAGER_DIRECTORY_FIXTURE } from '../sim/agencies';
-import { sdkCall } from '../live/transport';
+import { resolveAgencyRef, sdkCall } from '../live/transport';
 import { okFromSdk, okLive, toFail } from '../live/lane';
 
 export const agenciesSpecs = (c: any) => ({
@@ -76,6 +76,15 @@ export const agenciesSpecs = (c: any) => ({
   // `forTripRef`) is optional, so an unfiltered call is a valid "list
   // everything" form.
   //
+  // `agencyRef` is no longer a parameter `agencies.managers.list`/`.listPage`
+  // accept at all as of the `client-entry.ts` session-scoping change — a
+  // session-bound call now has it auto-bound from whichever session opened
+  // the client. This screen has no session-level field carrying one either
+  // way, so, same as `journey.trig` in `./journey.ts`, `resolveAgencyRef()`
+  // (`../live/transport.ts`) reads it, for real, off `backend/server.ts`'s
+  // own `GET /health` rather than showing a param this method no longer
+  // takes.
+  //
   // `live(p)` — lane B (`apiKeyAuth`) -> `sdkCall()`. NOTE for the
   // registry/allowlist step: `backend/server.ts`'s `ALLOWLISTED_SDK_PATHS`
   // does not yet carry `'agencies.managers.listPage'` — this screen's
@@ -85,12 +94,11 @@ export const agenciesSpecs = (c: any) => ({
     lane: 'B',
     note: 'q and forTripRef are both optional here — unlike travellers.listForAgency\'s directory search, there is a genuine "list everything" form of this endpoint. Pass forTripRef and each row\'s availability is computed against that trip\'s own dates.',
     p: [
-      { n: 'agencyRef', l: 'agencyRef', k: 'text', v: AGENCY_FIXTURE.agencyRef },
       { n: 'q', l: 'q (optional)', k: 'text', v: '' },
       { n: 'limit', l: 'limit', k: 'num', v: 50 },
     ],
-    req: (p: any) => ['GET', '/api/v1/agencies/' + p.agencyRef + '/managers' + (p.q ? '?q=' + p.q : ''), null],
-    snip: (p: any) => `const page = await kaafil.agencies.managers.listPage({\n  agencyRef: '${p.agencyRef}',${p.q ? `\n  q: '${p.q}',` : ''}\n  limit: ${p.limit},\n});\n// page.meta.page.hasNext / page.meta.page.cursor drive the next call`,
+    req: (p: any) => ['GET', '/api/v1/agencies/{agencyRef}/managers' + (p.q ? '?q=' + p.q : ''), null],
+    snip: (p: any) => `const page = await kaafil.agencies.managers.listPage({${p.q ? `\n  q: '${p.q}',` : ''}\n  limit: ${p.limit},\n});\n// agencyRef is auto-bound from the open session — page.meta.page.hasNext / page.meta.page.cursor drive the next call`,
     run: (p: any) => {
       const q = String(p.q || '').toLowerCase();
       const rows = AGENCY_MANAGER_DIRECTORY_FIXTURE.filter((m) => !q || m.fullName.toLowerCase().includes(q));
@@ -103,8 +111,9 @@ export const agenciesSpecs = (c: any) => ({
     // in `./travellers.ts`.
     live: async (p: any) => {
       try {
+        const agencyRef = await resolveAgencyRef();
         const items = await sdkCall(['agencies', 'managers', 'listPage'], {
-          agencyRef: p.agencyRef,
+          agencyRef,
           ...(p.q ? { q: p.q } : {}),
           limit: Number(p.limit) || 50,
         });

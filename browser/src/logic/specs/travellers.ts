@@ -33,7 +33,7 @@ import {
   TRAVELLER_ERASE_CASCADE_TEMPLATE,
   TRIP_MANIFEST_FIXTURE,
 } from '../sim/travellers';
-import { sdkCall } from '../live/transport';
+import { resolveAgencyRef, sdkCall } from '../live/transport';
 import { okFromSdk, okLive, toFail } from '../live/lane';
 
 const KNOWN_TRAVELLER_REFS = AGENCY_TRAVELLER_DIRECTORY_FIXTURE.map((t) => t.travellerId);
@@ -134,16 +134,22 @@ export const travellersSpecs = (c: any) => ({
     },
   },
 
+  // `agencyRef` is no longer a parameter `listForAgency`/`listForAgencyPage`
+  // accept at all as of the `client-entry.ts` session-scoping change — a
+  // session-bound call now has it auto-bound from whichever session opened
+  // the client. This screen has no session-level field carrying one either
+  // way, so, same as `agencies.managersPage` in `./agencies.ts`,
+  // `resolveAgencyRef()` reads it for real off `backend/server.ts`'s own
+  // `GET /health` rather than showing a param this method no longer takes.
   'travellers.listForAgency': {
     lane: 'B',
     note: 'GET /api/v1/agencies/{ref}/travellers — a directory SEARCH, not a "list everything": q is required and is floored at two characters engine-side. There is no unfiltered form of this endpoint.',
     p: [
-      { n: 'agencyRef', l: 'agencyRef', k: 'text', v: 'AG-12' },
       { n: 'q', l: 'q (min 2 chars)', k: 'text', v: 'an' },
     ],
     errs: [{ l: '1-char q → refused locally', patch: { q: 'a' } }],
-    req: (p: any) => ['GET', '/api/v1/agencies/' + p.agencyRef + '/travellers?q=' + p.q, null],
-    snip: (p: any) => `for await (const t of kaafil.travellers.listForAgency({\n  agencyRef: '${p.agencyRef}',\n  filters: { q: '${p.q}' },\n})) {\n  // the paginator handles cursors for you\n}`,
+    req: (p: any) => ['GET', '/api/v1/agencies/{agencyRef}/travellers?q=' + p.q, null],
+    snip: (p: any) => `for await (const t of kaafil.travellers.listForAgency({\n  filters: { q: '${p.q}' },\n})) {\n  // agencyRef is auto-bound from the open session; the paginator handles cursors for you\n}`,
     run: (p: any) => {
       if (String(p.q || '').length < 2)
         return c.fail('KaafilInvalidRequestError', null, null, 'q must be at least 2 characters. Refused locally, before any request: the engine floors this at two characters too.', { field: 'q', got: p.q });
@@ -158,8 +164,9 @@ export const travellersSpecs = (c: any) => ({
       if (String(p.q || '').length < 2)
         return c.fail('KaafilInvalidRequestError', null, null, 'q must be at least 2 characters. Refused locally, before any request: the engine floors this at two characters too.', { field: 'q', got: p.q });
       try {
+        const agencyRef = await resolveAgencyRef();
         const items = (await sdkCall(['travellers', 'listForAgency'], {
-          agencyRef: p.agencyRef,
+          agencyRef,
           filters: { q: p.q },
           limit: 50,
         })) as ReadonlyArray<unknown>;
@@ -182,18 +189,18 @@ export const travellersSpecs = (c: any) => ({
   // `backend/server.ts`'s `ALLOWLISTED_SDK_PATHS` any more than
   // `'travellers.listForAgency'` already isn't — this screen's `live()`
   // will 403 with `SDK_PATH_NOT_ALLOWLISTED` until that Set is updated.
+  // Same `agencyRef` auto-bind note as `listForAgency` immediately above.
   'travellers.listForAgencyPage': {
     lane: 'B',
     note: 'The manual escape hatch: pass cursor yourself and read meta.page.hasNext / meta.page.cursor to decide whether to call again — the same page listForAgency\'s paginator would have fetched next, just without it holding the cursor for you.',
     p: [
-      { n: 'agencyRef', l: 'agencyRef', k: 'text', v: 'AG-12' },
       { n: 'q', l: 'q (min 2 chars)', k: 'text', v: 'an' },
       { n: 'cursor', l: 'cursor (optional)', k: 'text', v: '' },
       { n: 'limit', l: 'limit', k: 'num', v: 50 },
     ],
     errs: [{ l: '1-char q → refused locally', patch: { q: 'a' } }],
-    req: (p: any) => ['GET', '/api/v1/agencies/' + p.agencyRef + '/travellers?q=' + p.q + (p.cursor ? '&cursor=' + p.cursor : '') + '&limit=' + p.limit, null],
-    snip: (p: any) => `const page = await kaafil.travellers.listForAgencyPage({\n  agencyRef: '${p.agencyRef}', q: '${p.q}',${p.cursor ? `\n  cursor: '${p.cursor}',` : ''}\n  limit: ${p.limit},\n});\n// page.meta.page.hasNext / page.meta.page.cursor drive the next call yourself`,
+    req: (p: any) => ['GET', '/api/v1/agencies/{agencyRef}/travellers?q=' + p.q + (p.cursor ? '&cursor=' + p.cursor : '') + '&limit=' + p.limit, null],
+    snip: (p: any) => `const page = await kaafil.travellers.listForAgencyPage({\n  q: '${p.q}',${p.cursor ? `\n  cursor: '${p.cursor}',` : ''}\n  limit: ${p.limit},\n});\n// agencyRef is auto-bound from the open session — page.meta.page.hasNext / page.meta.page.cursor drive the next call yourself`,
     run: (p: any) => {
       if (String(p.q || '').length < 2)
         return c.fail('KaafilInvalidRequestError', null, null, 'q must be at least 2 characters. Refused locally, before any request: the engine floors this at two characters too.', { field: 'q', got: p.q });
@@ -216,8 +223,9 @@ export const travellersSpecs = (c: any) => ({
       if (String(p.q || '').length < 2)
         return c.fail('KaafilInvalidRequestError', null, null, 'q must be at least 2 characters. Refused locally, before any request: the engine floors this at two characters too.', { field: 'q', got: p.q });
       try {
+        const agencyRef = await resolveAgencyRef();
         const items = (await sdkCall(['travellers', 'listForAgencyPage'], {
-          agencyRef: p.agencyRef,
+          agencyRef,
           q: p.q,
           ...(p.cursor ? { cursor: p.cursor } : {}),
           limit: Number(p.limit) || 50,

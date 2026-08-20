@@ -889,6 +889,7 @@ async function main(): Promise<void> {
     // version of it.
     const onGround = new KaafilClient({ environment: 'test', baseUrl });
     onGround.session.open({
+      agencyRef,
       accessToken: managerSession.accessToken,
       refreshToken: managerSession.refreshToken,
       expiresAt: managerSession.expiresAt,
@@ -3506,6 +3507,7 @@ async function main(): Promise<void> {
         // making the failure any less real.
         const deadClient = new KaafilClient({ environment: 'test', baseUrl: 'http://127.0.0.1:1' });
         deadClient.session.open({
+          agencyRef,
           accessToken: managerSession.accessToken,
           refreshToken: managerSession.refreshToken,
           expiresAt: managerSession.expiresAt,

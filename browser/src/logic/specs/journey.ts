@@ -132,7 +132,7 @@ export const journeySpecs = (c: any) => ({
     // this screen has no `agencyRef` param to show one from (see `live()`'s
     // `resolveAgencyRef()` below), so the snippet reads it off your own
     // agency record rather than showing a param this method doesn't accept.
-    snip: () => `const { data } = await kaafil.journey.triggers.list({ agencyRef: yourAgency.ref });`,
+    snip: () => `const { data } = await kaafil.journey.triggers.list({});\n// agencyRef is auto-bound from the open session — it is no longer a parameter this method accepts`,
     run: () => c.ok([
       { key: 'boarding.autoOpen', enabled: true, firesAt: 'T-12h' },
       { key: 'rooming.autoAssignOnManifest', enabled: false, firesAt: null },
@@ -203,7 +203,7 @@ export const journeySpecs = (c: any) => ({
     // Agency-scoped, same as `journey.trig` above — see this file's header
     // for `resolveAgencyRef()`.
     req: (p: any) => ['PATCH', '/api/v1/agencies/{agencyRef}/journey-triggers/' + p.key, { enabled: p.enabled === 'true' }],
-    snip: (p: any) => `const current = (await kaafil.journey.triggers.list({ agencyRef: yourAgency.ref }))\n  .data.find((t) => t.key === '${p.key}');\nawait kaafil.journey.triggers.patch({\n  agencyRef: yourAgency.ref, key: '${p.key}', enabled: ${p.enabled},\n  version: current.version,   // If-Match — required, never optional\n});`,
+    snip: (p: any) => `const current = (await kaafil.journey.triggers.list({}))\n  .data.find((t) => t.key === '${p.key}');\nawait kaafil.journey.triggers.patch({\n  key: '${p.key}', enabled: ${p.enabled},   // agencyRef is auto-bound from the open session\n  version: current.version,   // If-Match — required, never optional\n});`,
     run: (p: any) => {
       const rows = ensureJourneyTriggers(c);
       const row = rows.find((t: any) => t.key === p.key);

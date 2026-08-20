@@ -145,7 +145,7 @@ export const formsSpecs = (c: any) => ({
       { n: 'responsePolicy', l: 'responsePolicy', k: 'sel', v: 'SINGLE', o: ['SINGLE', 'MULTIPLE'] },
     ],
     req: (p: any) => ['POST', '/api/v1/agencies/{ref}/forms', { key: p.key, title: p.title, phase: p.phase, responsePolicy: p.responsePolicy }],
-    snip: (p: any) => `const { data } = await kaafil.forms.create({\n  agencyRef, key: '${p.key}', title: '${p.title}', phase: '${p.phase}', responsePolicy: '${p.responsePolicy}',\n});\n// data.status === 'DRAFT' — publish() is the separate act that makes it live`,
+    snip: (p: any) => `const { data } = await kaafil.forms.create({\n  key: '${p.key}', title: '${p.title}', phase: '${p.phase}', responsePolicy: '${p.responsePolicy}',\n});\n// agencyRef is auto-bound from the open session\n// data.status === 'DRAFT' — publish() is the separate act that makes it live`,
     run: (p: any) => {
       const forms = ensureForms(c);
       if (forms.some((f: any) => f.key === p.key))
@@ -178,7 +178,7 @@ export const formsSpecs = (c: any) => ({
     note: 'The agency’s whole catalog, every status included — DRAFT, ACTIVE, CLOSED and ARCHIVED forms all come back on one list; filtering by status is a client-side concern, not a query param this operation takes.',
     p: [],
     req: () => ['GET', '/api/v1/agencies/{ref}/forms', null],
-    snip: () => `const { data } = await kaafil.forms.list({ agencyRef });\n// data.items — every status, DRAFT through ARCHIVED`,
+    snip: () => `const { data } = await kaafil.forms.list({});\n// agencyRef is auto-bound from the open session. data.items — every status, DRAFT through ARCHIVED`,
     run: () => c.ok({ items: ensureForms(c).map(toListRow) }),
     live: async () => {
       try {
