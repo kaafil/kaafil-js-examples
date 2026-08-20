@@ -264,5 +264,45 @@ export const itinerarySpecs = (c: any) => ({
         return okLive({ window: 'updatedAt >= since - 5s (at-least-once, on purpose)', cursorWas: skew ? 'YOUR clock — ahead of the engine, rows can be missed silently' : 'the engine’s own meta.serverTime', data: rows }, meta);
       } catch (e: any) { return toFail(e); }
     }
+  },
+
+  // `itinerary.days.patch` (this job) — the day card's title/summary, the
+  // one write this file had no screen for. `managerAuth`-only, lane D, same
+  // as every other itinerary write above. Versioned (`If-Match`, required
+  // not optional) with the identical pattern `itinerary.patch`/`.remove`
+  // already use: `live()` resolves `version` from a fresh `itinerary.read`
+  // rather than guessing at it. Sim `days[]` gained `cardTitle`/
+  // `summaryLine`/`version` (`../sim/helpers.ts#ensureItin`) so this can
+  // round-trip for real in Simulated mode too.
+  'itinerary.dayPatch': {
+    lane: 'D', view: 'itin',
+    note: 'summaryLine: null CLEARS it — a real, logged change — while omitting the field leaves the stored value alone. Requires the day’s own version as If-Match: a missing one and a stale one both answer the identical 409 CONFLICT_VERSION.',
+    p: [
+      { n: 'tripRef', l: 'tripRef', k: 'sel' }, { n: 'dayIndex', l: 'dayIndex', k: 'num', v: 0 },
+      { n: 'cardTitle', l: 'cardTitle', k: 'text', v: 'Acclimatisation day' },
+      { n: 'summaryLine', l: 'summaryLine (blank clears it)', k: 'text', v: '' }
+    ],
+    req: (p: any) => ['PATCH', '/api/v1/trips/' + p.tripRef + '/itinerary/days/' + p.dayIndex, { cardTitle: p.cardTitle, summaryLine: p.summaryLine || null }],
+    snip: (p: any) => `await client.itinerary.days.patch({\n  tripRef: '${p.tripRef}', dayIndex: ${p.dayIndex},\n  cardTitle: '${p.cardTitle}', summaryLine: ${p.summaryLine ? `'${p.summaryLine}'` : 'null'},\n  version: day.version,   // version guard, not a timestamp\n});`,
+    run: (p: any) => {
+      const it = c.ensureItin(p.tripRef); if (!it) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+      const day = it.days[Number(p.dayIndex)];
+      if (!day) return c.fail('KaafilValidationError', 'VALIDATION_ERROR', 422, 'dayIndex is outside this trip’s day range.', { fields: { dayIndex: 'out of range 0..' + (it.days.length - 1) } });
+      day.cardTitle = p.cardTitle; day.summaryLine = p.summaryLine || null; day.version = (day.version || 1) + 1;
+      it.log.unshift({ at: Date.now(), text: 'Manisha Patel retitled Day ' + (Number(p.dayIndex) + 1) + ' “' + p.cardTitle + '”.' });
+      return c.ok({ dayIndex: day.i, cardTitle: day.cardTitle, summaryLine: day.summaryLine, version: day.version });
+    },
+    live: async (p: any) => {
+      try {
+        const mc = managerClient();
+        // `version` is a real version guard (an If-Match header the SDK sets) the engine enforces — resolved
+        // from a live read of the day's current row, never guessed.
+        const { data: board } = unwrapSdk(await mc.itinerary.read({ tripRef: p.tripRef }));
+        const current = (board.days || []).find((d: any) => d.dayIndex === Number(p.dayIndex)) as any;
+        if (!current) return c.fail('KaafilValidationError', 'VALIDATION_ERROR', 422, 'dayIndex is outside this trip’s day range.', { fields: { dayIndex: 'out of range 0..' + ((board.days || []).length - 1) } });
+        const { data, meta } = unwrapSdk(await mc.itinerary.days.patch({ tripRef: p.tripRef, dayIndex: Number(p.dayIndex), version: current.version, cardTitle: p.cardTitle, summaryLine: p.summaryLine || null }));
+        return okLive({ dayIndex: (data as any).dayIndex, cardTitle: (data as any).cardTitle, summaryLine: (data as any).summaryLine, version: (data as any).version }, meta);
+      } catch (e: any) { return toFail(e); }
+    }
   }
 });

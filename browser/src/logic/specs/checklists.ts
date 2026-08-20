@@ -14,7 +14,7 @@
 // per `kaafil-js/src/resources/checklists.ts`'s
 // `checklistPath`. The preview must match what `live()` actually sends.
 
-import { sdkCall, managerClient } from '../live/transport';
+import { resolveAgencyRef, sdkCall, managerClient } from '../live/transport';
 import { okFromSdk, toFail } from '../live/lane';
 
 // The real engine's `AddChecklistItemRequest.phase` enum is
@@ -72,6 +72,39 @@ export const add = (c: any) => ({
         title: p.title,
       });
       return res;
+    } catch (e) { return toFail(e); }
+  }
+});
+
+export const patch = (c: any) => ({
+  lane: 'D', view: 'chk',
+  note: 'Sending phase without gate in the SAME call re-derives gate from the fixed phase→gate map — phase is a hint only, never stored on the item itself. Send gate explicitly alongside phase to override the derived value.',
+  p: [
+    { n: 'tripRef', l: 'tripRef', k: 'sel' },
+    { n: 'itemId', l: 'itemId', k: 'sel', d: (r: any) => c.chkItems(r).map((i: any) => i.id) },
+    { n: 'title', l: 'new title', k: 'text', v: 'Passport scans on file (updated)' }
+  ],
+  req: (p: any) => ['PATCH', '/api/v1/trips/' + p.tripRef + '/checklist/items/' + p.itemId, { title: p.title }],
+  snip: (p: any) => `await client.checklists.items.patch({\n  tripRef, itemId: '${p.itemId}', title: '${p.title}', version,\n});\n// If-Match built from version — NOT the same guard as toggle's expectedStatus`,
+  run: (p: any) => {
+    const chk = c.ensureChk(p.tripRef); if (!chk) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this ref.');
+    let it: any = null, sec: any = null;
+    chk.sections.forEach((s: any) => s.items.forEach((i: any) => { if (i.id === p.itemId) { it = i; sec = s; } }));
+    if (!it) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No checklist item with that id.');
+    it.title = p.title; it.version += 1;
+    return c.ok({ ...it, sectionId: sec.id });
+  },
+  // sdk lane: `patchChecklistItem` is managerAuth-only, and (like `remove`)
+  // needs the item's real `version` for `If-Match` — the UI's param bag
+  // carries only `itemId`, so this reads the live aggregate first to find
+  // it, same pattern `remove`'s `live()` above uses.
+  live: async (p: any) => {
+    try {
+      const client = managerClient();
+      const agg: any = await client.checklists.read({ tripRef: p.tripRef });
+      const found = (agg.data.sections || []).flatMap((s: any) => (s.items || []).map((i: any) => ({ ...i, sectionId: s.id }))).find((i: any) => i.id === p.itemId);
+      if (!found) return { err: { name: 'KaafilNotFoundError', code: 'RESOURCE_NOT_FOUND', status: 404, message: 'No checklist item with that id on the live trip.', details: null, retryable: 'no' } };
+      return await client.checklists.items.patch({ tripRef: p.tripRef, itemId: p.itemId, title: p.title, version: found.version });
     } catch (e) { return toFail(e); }
   }
 });
@@ -164,14 +197,123 @@ export const pull = (c: any) => ({
   }
 });
 
+// --- checklists.agencyTemplates (this pass) -------------------------------
+//
+// The AGENCY-level template library itself — distinct from `tpl`/`pull`
+// above, which are trip-scoped and read/pull only. `tpl`'s own note ("this
+// library is genuinely empty… no route anywhere creates or edits an agency
+// template yet") is no longer the whole story: the agency-scoped CRUD below
+// is a separate, already-shipped route group
+// (`GET/POST/PATCH/DELETE /api/v1/agencies/{ref}/checklist-templates[/{id}]`),
+// `apiKeyAuth`/`agencyAdminAuth` — never `managerAuth` — so every `live()`
+// here is lane B via `sdkCall()`, same convention as `tpl` above.
+
+export const agencyTplList = (c: any) => ({
+  lane: 'B', view: 'chk',
+  note: 'The agency’s full template library, across every locale. Starts empty — agencyTplCreate populates it for real, not a canned fixture.',
+  p: [],
+  req: () => ['GET', '/api/v1/agencies/{ref}/checklist-templates', null],
+  snip: () => `const { data } = await kaafil.checklists.agencyTemplates.list({ agencyRef });`,
+  run: () => c.ok({ templates: c.sim.agencyTpl || [] }),
+  live: async () => {
+    try {
+      const agencyRef = await resolveAgencyRef();
+      return okFromSdk(await sdkCall(['checklists', 'agencyTemplates', 'list'], { agencyRef }));
+    } catch (e) { return toFail(e); }
+  }
+});
+
+export const agencyTplCreate = (c: any) => ({
+  lane: 'B', view: 'chk',
+  note: 'No gate here either — same as a trip-scoped item, phase decides it once this template is pulled.',
+  p: [
+    { n: 'key', l: 'key', k: 'text', v: 'pre_departure_docs' },
+    { n: 'title', l: 'title', k: 'text', v: 'Pre-departure documents' },
+    { n: 'phase', l: 'phase', k: 'sel', v: 'PRE_DEPARTURE', o: ['PRE_DEPARTURE', 'IN_TRIP', 'POST_TRIP'] }
+  ],
+  req: (p: any) => ['POST', '/api/v1/agencies/{ref}/checklist-templates', { key: p.key, title: p.title, phase: p.phase }],
+  snip: (p: any) => `const { data } = await kaafil.checklists.agencyTemplates.create({\n  agencyRef, key: '${p.key}', title: '${p.title}', phase: '${p.phase}',\n});`,
+  run: (p: any) => {
+    c.sim.agencyTpl = c.sim.agencyTpl || [];
+    const id = 'tpl_' + (++c.sim.seq);
+    const row = { id, key: p.key, locale: 'en', title: p.title, phase: p.phase, audience: 'INTERNAL', version: 1, items: [] };
+    c.sim.agencyTpl.push(row);
+    return c.ok(row);
+  },
+  live: async (p: any) => {
+    try {
+      const agencyRef = await resolveAgencyRef();
+      return okFromSdk(await sdkCall(['checklists', 'agencyTemplates', 'create'], { agencyRef, key: p.key, title: p.title, phase: p.phase }));
+    } catch (e) { return toFail(e); }
+  }
+});
+
+export const agencyTplPatch = (c: any) => ({
+  lane: 'B', view: 'chk',
+  note: 'items, when sent, is the FULL replacement list, not a delta — omitted here, so this only ever renames the template.',
+  p: [
+    { n: 'templateId', l: 'templateId', k: 'sel', d: () => (c.sim.agencyTpl || []).map((t: any) => t.id) },
+    { n: 'title', l: 'new title', k: 'text', v: 'Pre-departure documents (v2)' }
+  ],
+  req: (p: any) => ['PATCH', '/api/v1/agencies/{ref}/checklist-templates/' + p.templateId, { title: p.title }],
+  snip: (p: any) => `await kaafil.checklists.agencyTemplates.patch({\n  agencyRef, templateId: '${p.templateId}', title: '${p.title}', version,\n});`,
+  run: (p: any) => {
+    const t = (c.sim.agencyTpl || []).find((x: any) => x.id === p.templateId);
+    if (!t) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No agency template with that id.');
+    t.title = p.title; t.version += 1;
+    return c.ok(t);
+  },
+  // Needs the template's real `version` for `If-Match` — the UI's param bag
+  // carries only `templateId`, so this reads the live list first to find
+  // it, same pattern `checklists.remove`'s `live()` above uses for an item.
+  live: async (p: any) => {
+    try {
+      const agencyRef = await resolveAgencyRef();
+      const list: any = await sdkCall(['checklists', 'agencyTemplates', 'list'], { agencyRef });
+      const found = (list?.templates || []).find((x: any) => x.id === p.templateId);
+      if (!found) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No agency template with that id on this tenant.');
+      return okFromSdk(await sdkCall(['checklists', 'agencyTemplates', 'patch'], { agencyRef, templateId: p.templateId, title: p.title, version: found.version }));
+    } catch (e) { return toFail(e); }
+  }
+});
+
+export const agencyTplRemove = (c: any) => ({
+  lane: 'B', view: 'chk',
+  note: 'Retires the template. Needs the same real version as agencyTplPatch for If-Match.',
+  p: [{ n: 'templateId', l: 'templateId', k: 'sel', d: () => (c.sim.agencyTpl || []).map((t: any) => t.id) }],
+  req: (p: any) => ['DELETE', '/api/v1/agencies/{ref}/checklist-templates/' + p.templateId, null],
+  snip: (p: any) => `await kaafil.checklists.agencyTemplates.remove({ agencyRef, templateId: '${p.templateId}', version });`,
+  run: (p: any) => {
+    const list = c.sim.agencyTpl || [];
+    const idx = list.findIndex((x: any) => x.id === p.templateId);
+    if (idx < 0) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No agency template with that id.');
+    const [removed] = list.splice(idx, 1);
+    return c.ok({ id: removed.id, deleted: true });
+  },
+  live: async (p: any) => {
+    try {
+      const agencyRef = await resolveAgencyRef();
+      const list: any = await sdkCall(['checklists', 'agencyTemplates', 'list'], { agencyRef });
+      const found = (list?.templates || []).find((x: any) => x.id === p.templateId);
+      if (!found) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No agency template with that id on this tenant.');
+      return okFromSdk(await sdkCall(['checklists', 'agencyTemplates', 'remove'], { agencyRef, templateId: p.templateId, version: found.version }));
+    } catch (e) { return toFail(e); }
+  }
+});
+
 // Reconciled to the dominant spec-file convention (named `xxxSpecs` export
 // producing the fully-keyed 'checklists.*' record) — the individual per-method
 // exports above are untouched (bodies byte-identical); this merely wraps them.
 export const checklistsSpecs = (c: any) => ({
   'checklists.read': read(c),
   'checklists.add': add(c),
+  'checklists.patch': patch(c),
   'checklists.toggle': toggle(c),
   'checklists.remove': remove(c),
   'checklists.tpl': tpl(c),
-  'checklists.pull': pull(c)
+  'checklists.pull': pull(c),
+  'checklists.agencyTplList': agencyTplList(c),
+  'checklists.agencyTplCreate': agencyTplCreate(c),
+  'checklists.agencyTplPatch': agencyTplPatch(c),
+  'checklists.agencyTplRemove': agencyTplRemove(c)
 });

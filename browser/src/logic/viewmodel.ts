@@ -33,12 +33,16 @@ import type { StubTone } from '../ui/StubCard';
 
 /** Narrative content for the two-tone StubCard, keyed by `mod.act`. Only
  * methods.ts's `'plan'`/`'console'` states ever need an entry — today that is
- * exactly `entitlement.read` (console). `offline.outbox` used to be the second
- * entry here (plan, phase 15); the offline layer shipped in
+ * `entitlement.read` (console) alone.
+ * `offline.outbox` used to be an entry here (plan, phase 15); the offline layer shipped in
  * `kaafil-js@0.1.0-beta.3` and it now has a real `live()`, so its stub copy was
- * DELETED rather than left to read as current. A method that gains a stub state
- * later without an entry here still renders honestly (the fallback below), it
- * just won't have this file's hand-written detail. */
+ * DELETED rather than left to read as current. `offline.digest` was a second
+ * such entry (plan, the 2026-08-20 consolidation pass's `sync-digest-not-on-
+ * server-entry`); the SDK-side gap closed same-day (`kaafil-js/src/client.ts`
+ * now wires `sync` onto the server entry too), so this stub copy is DELETED
+ * for the same reason. A method that gains a stub state later without an
+ * entry here still renders honestly (the fallback below), it just won't have
+ * this file's hand-written detail. */
 const STUB_INFO: Record<string, { missing: string; why: string; phase?: number; consoleOp?: string }> = {
   'entitlement.read': {
     missing: 'No API key and no manager session can ever call readAgencyEntitlement — its scheme is consoleAuth alone.',

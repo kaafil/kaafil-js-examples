@@ -223,6 +223,47 @@ export async function resolveAgencyRef(): Promise<string> {
   });
 }
 
+/** Reads `backend/server.ts`'s own resolved plane (`environment`, `'test'`
+ * or `'live'`) off the same `GET /health` route `resolveAgencyRef` above
+ * reads `agencyRef` from — `backend/server.ts` derives it once at boot from
+ * the `kf_test_…`/`kf_live_…` prefix on `KAAFIL_API_KEY` and answers it
+ * plainly, unauthenticated, for exactly this reason: it's the one fact a
+ * browser tab has no other way to learn about a server-side secret it must
+ * never see the value of.
+ *
+ * This is `../specs/test.ts`'s gate: `kaafil-js`'s own `test` resource
+ * throws `TestEnvironmentRequiredError` locally (before any request) when
+ * its OWN client is constructed `{ environment: 'live' }` — a check this
+ * repo cannot run in-browser, because the `test.*` operations are lane B
+ * (apiKeyAuth, proxied through `/sdk`) and the client that matters is the
+ * one `backend/server.ts` built from `KAAFIL_API_KEY`, not anything this
+ * tab holds. Fetching the backend's already-resolved plane and refusing
+ * HERE, before `sdkCall` ever POSTs to `/sdk`, is this repo's honest
+ * mirror of that same client-side courtesy — not a replacement for the
+ * SDK's own throw (which still fires, backend-side, if this check is ever
+ * bypassed or stale), same relationship `ApiKeyEnvironmentMismatchError`
+ * has to the engine's own tenant-plane 404. */
+export async function resolveEnvironment(): Promise<'test' | 'live'> {
+  const url = `${backendUrl()}/health`;
+  let body: unknown;
+  try {
+    const res = await fetch(url);
+    body = await res.json();
+    const env = (body as { environment?: unknown })?.environment;
+    if (env === 'test' || env === 'live') return env;
+  } catch {
+    // falls through to the thrown error below
+  }
+  throw new TransportError({
+    name: 'TransportError',
+    code: null,
+    status: null,
+    message: `${url} did not answer with {environment: 'test'|'live'} — this call cannot resolve which plane your CRM backend is configured against without it.`,
+    details: null,
+    retryable: 'no',
+  });
+}
+
 // ---------------------------------------------------------------------------
 // sdkCall — the API-key lane, proxied through backend/server.ts's /sdk
 // ---------------------------------------------------------------------------

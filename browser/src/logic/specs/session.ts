@@ -11,6 +11,7 @@ import {
   adminSdkClient,
   currentAdminSession,
   currentSession,
+  managerClient,
   mintAgencyAdminSession,
   mintSession,
   sdkCall,
@@ -106,7 +107,7 @@ export const sessionSpecs = (c: any) => ({
     lane: 'D',
     note: 'The SDK exchanges the refresh token itself — pre-emptively and on a 401. This button only forces what it already does. The session needs no trip at all — it is identified by managerRef alone (check the minted JWT: no trip claim anywhere in it), and neither does this proof call: kaafil-js@0.1.0-beta.2 added client.notifications.list() (GET /api/v1/managers/me/notifications), the one genuinely manager-only, non-trip-scoped read in the vendored contract — closing the SDK gap the previous revision of this screen had to work around.',
     p: [],
-    req: () => ['POST', '/api/v1/auth/manager-token/refresh', { refreshToken: 'kf_ref_…' }],
+    req: () => ['POST', '/api/v1/auth/manager-tokens/refresh', { refreshToken: 'kf_ref_…' }],
     snip: () => `// no code: the SDK rotates on its own.\n// onRefresh fires with the new pair — persist it, that's all.`,
     run: () => {
       const s = c.sim.session;
@@ -249,6 +250,29 @@ export const sessionSpecs = (c: any) => ({
         if (!s) return c.fail('SessionRequiredError', null, null, 'No agency-admin session minted yet — run session.mintAdmin first. Connected mode has no simulated session to fall back on.');
         adminSdkClient();
         return okLive({ open: true, agencyAdminRef: s.agencyAdminRef }, null);
+      } catch (err) {
+        return toFail(err);
+      }
+    }
+  },
+  'session.notifRead': {
+    lane: 'D',
+    note: 'Idempotent and outbox-friendly. Own rows only — a different manager’s notification (or a cross-tenant id) answers 404, never 403. Marking an already-read row again returns the same row unchanged.',
+    p: [{ n: 'notifId', l: 'notification id', k: 'sel', d: () => (c.sim.notif || []).map((n: any) => n.id) }],
+    req: (p: any) => ['POST', '/api/v1/notifications/' + p.notifId + '/read', {}],
+    snip: (p: any) => `await client.notifications.markRead({ id: '${p.notifId}' });`,
+    run: (p: any) => {
+      const n = (c.sim.notif || []).find((x: any) => x.id === p.notifId);
+      if (!n) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No notification with that id — own rows only; a different manager’s notification (or a cross-tenant id) answers this same 404, never 403.');
+      if (!n.readAt) { n.readAt = c.nowIso(); n.version += 1; }
+      return c.ok({ id: n.id, title: n.title, body: n.body, readAt: n.readAt, version: n.version });
+    },
+    // `markNotificationRead` is `managerAuth`-only per the vendored spec —
+    // straight through the open manager session, same as every on-ground
+    // write elsewhere in this playground.
+    live: async (p: any) => {
+      try {
+        return await managerClient().notifications.markRead({ id: p.notifId });
       } catch (err) {
         return toFail(err);
       }

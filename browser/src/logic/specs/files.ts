@@ -21,9 +21,15 @@
 // `tripRef` at all (it's identified by `managerRef` alone; see
 // `../live/transport.ts`'s `LiveSession` header). `../live/lane.ts`'s header
 // covers the shared envelope contract.
+//
+// New card (this job): `'files.url'` — `readFileUrl` accepts an API key,
+// same as `files.read`'s own second (conditional) call. Shown as its own
+// card so the `410 FILE_PURGED` case (a `ready`-only mint, never for a
+// `purged` file) is visible on a call of its own rather than folded away
+// inside `files.read`.
 
 import { sdkCall, managerClient } from '../live/transport';
-import { toFail, unwrapSdk } from '../live/lane';
+import { toFail, unwrapSdk, okLive } from '../live/lane';
 
 const PURPOSE_TO_REAL: Record<string, string> = {
   EXPENSE_RECEIPT: 'expense_receipt',
@@ -152,6 +158,27 @@ export const filesSpecs = (c: any) => ({
           getUrl = url.url;
         }
         return { data: { fileKey: meta.id, status, contentType: meta.contentType, sizeBytes: meta.sizeBytes, getUrl }, meta: meta.meta };
+      } catch (e) { return toFail(e); }
+    }
+  },
+  'files.url': {
+    lane: 'D', view: 'files',
+    note: 'A fresh 5-minute signed GET, minted on every call — never stored, never reused — and only for a READY file. A PURGED file answers 410 FILE_PURGED here; the metadata row (files.read) survives forever, the bytes do not.',
+    p: [{ n: 'fileKey', l: 'fileKey', k: 'sel', d: (r: any) => c.sim.files.map((f: any) => f.key) }],
+    req: (p: any) => ['GET', '/api/v1/files/' + p.fileKey + '/url', null],
+    snip: (p: any) => `const { data } = await get('/files/${p.fileKey}/url');\n// data.url expires in 5 minutes — mint fresh, never cache`,
+    run: (p: any) => {
+      const f = c.sim.files.find((x: any) => x.key === p.fileKey);
+      if (!f) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No file with that key.', { resource: 'File' });
+      if (f.status === 'PURGED') return c.fail('KaafilApiError', 'FILE_PURGED', 410, 'This file’s bytes are gone — the metadata row survives, the object does not.', { rule: 'file_purged' });
+      if (f.status !== 'READY') return c.fail('KaafilApiError', 'BUSINESS_RULE_VIOLATION', 422, 'Only a READY file can mint a signed GET — this one is ' + f.status + '.', { rule: 'file_not_ready' });
+      return c.ok({ url: 'https://s3.ap-south-1.example/kaafil/' + f.key + '?X-Amz-Expires=300&…', expiresAt: new Date(Date.now() + 300000).toISOString() });
+    },
+    // sdk lane: `readFileUrl` accepts an API key, same as `readFile`.
+    live: async (p: any) => {
+      try {
+        const url: any = await sdkCall(['files', 'url'], { fileId: p.fileKey });
+        return okLive({ url: url.url, expiresAt: url.expiresAt }, (url as any).meta);
       } catch (e) { return toFail(e); }
     }
   }
