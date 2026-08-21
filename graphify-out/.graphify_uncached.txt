@@ -1,0 +1,6 @@
+/Users/unico-024/Desktop/Kaafil/v2/kaafil-js-examples/CLAUDE.md
+/Users/unico-024/Desktop/Kaafil/v2/kaafil-js-examples/GAPS.md
+/Users/unico-024/Desktop/Kaafil/v2/kaafil-js-examples/README.md
+/Users/unico-024/Desktop/Kaafil/v2/kaafil-js-examples/backend/README.md
+/Users/unico-024/Desktop/Kaafil/v2/kaafil-js-examples/browser/index.html
+/Users/unico-024/Desktop/Kaafil/v2/kaafil-js-examples/pnpm-workspace.yaml
