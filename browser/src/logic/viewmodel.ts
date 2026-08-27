@@ -352,8 +352,72 @@ function viewValsBody(this: any, v: any, d: any, ref: any, badge: any, out: any)
       }];
     }
     if (!out.fileRows.length) out.fileRows = [{ key: 'nothing yet', meta: 'request an upload to start', status: 'EMPTY', bg: '#fafaf9', fg: '#8f8f8f' }];
+  } else if (v === 'share' && d && (this.activeMethod()?.[0] === 'snapshot' || this.activeMethod()?.[0] === 'manifest')) {
+    // The traveller-facing fetch surface — renders THIS call's own single
+    // result, exactly like `files`' own `viewFiles` branch does for the
+    // same reason (a one-shot fetch, not a living board). Deliberately a
+    // SEPARATE render path from the `shareRows` token-list branch below,
+    // even though both live under the one `share` module/view: minting a
+    // token and fetching what it exposes are different credentials, and
+    // conflating their renders would blur that boundary this SDK reference
+    // otherwise draws sharply.
+    //
+    // `viewValsBody` (this function) is called via `.call(this, …)` from
+    // `viewVals` above, so it does not close over that function's own local
+    // `act` — `this.activeMethod()` is re-read here instead, the same way
+    // every other value this function needs off `this` already is.
+    const act = this.activeMethod();
+    out.viewShare = true;
+    out.shareMode = act[0];
+    if (act[0] === 'manifest') {
+      out.viewTitle = "A traveller's manifest"; out.viewSub = 'per-section freshness — same gate as the snapshot, no payload';
+      const sections = d.sections || {};
+      out.snapManifestRows = Object.keys(sections).map((key) => ({ key, version: sections[key]?.version || '' }));
+      out.snapServerTime = d.serverTime || '';
+    } else {
+      out.viewTitle = "A traveller's snapshot"; out.viewSub = 'what client.share.snapshot({ token }) actually returns for this token, right now';
+      const trip = d.trip || {};
+      out.snapTrip = { name: trip.name || '', startDate: trip.startDate || '', endDate: trip.endDate || '', timezone: trip.timezone || '', phase: trip.phase || '' };
+      out.snapDays = ((d.itinerary && d.itinerary.days) || []).map((day: any) => ({
+        dayIndex: day.dayIndex, isoDate: day.isoDate, cardTitle: day.cardTitle, summaryLine: day.summaryLine, isToday: !!day.isToday,
+        items: (day.items || []).map((it: any) => ({
+          id: it.id, title: it.title, type: it.type, startTime: it.startTime, endTime: it.endTime,
+          timeState: it.timeState,
+          timeStateBg: it.timeState === 'now' ? '#e8f7ef' : it.timeState === 'done' ? '#f2f1ef' : '#efecfb',
+          timeStateFg: it.timeState === 'now' ? '#197d4b' : it.timeState === 'done' ? '#6f6f6f' : '#6852d6'
+        }))
+      }));
+      // One row per section that ACTUALLY appears as a key on `d` — never a
+      // placeholder for an absent one. A real traveller UI renders exactly
+      // this set and nothing more; there is no "unavailable" card for a
+      // dark section anywhere in this list.
+      const bookingSummary = (sec: any) => {
+        const days = (sec && sec.days) || [];
+        const n = days.reduce((sum: number, day: any) => sum + (day.items || []).length, 0);
+        return n + ' item' + (n === 1 ? '' : 's') + ' across ' + days.length + ' day' + (days.length === 1 ? '' : 's');
+      };
+      const present: Array<{ key: string; summary: string }> = [];
+      if (d.itinerary) present.push({ key: 'itinerary', summary: out.snapDays.length + ' day(s)' });
+      if (d.rooming) present.push({ key: 'rooming', summary: d.rooming.room + (d.rooming.roommates?.length ? ' · with ' + d.rooming.roommates.join(', ') : '') });
+      if (d.seating) present.push({ key: 'seating', summary: d.seating.vehicle?.label + (d.seating.seat ? ' · seat ' + d.seating.seat : ' · seat not yet issued') });
+      if (d.checklists) present.push({ key: 'checklists', summary: (d.checklists.items || []).length + ' item(s)' });
+      if (d.pickup) present.push({ key: 'pickup', summary: (d.pickup.stops || []).length + ' stop(s)' });
+      if (d.accommodation) present.push({ key: 'accommodation', summary: bookingSummary(d.accommodation) });
+      if (d.transport) present.push({ key: 'transport', summary: bookingSummary(d.transport) });
+      if (d.activities) present.push({ key: 'activities', summary: bookingSummary(d.activities) });
+      if (d.documents) present.push({ key: 'documents', summary: (d.documents.vouchers || []).length + ' voucher(s), each URL good for 5 minutes' });
+      if (d.money) present.push({ key: 'money', summary: d.money.currency + ' ' + (d.money.dueMinor / 100).toFixed(2) + ' due of ' + (d.money.totalMinor / 100).toFixed(2) });
+      if (d.managerContact) present.push({ key: 'managerContact', summary: d.managerContact.name + (d.managerContact.phone ? ' · ' + d.managerContact.phone : '') });
+      if (d.agencyContact) present.push({ key: 'agencyContact', summary: d.agencyContact.name + (d.agencyContact.phone ? ' · ' + d.agencyContact.phone : '') });
+      out.snapPresentSections = present;
+      // The full 13-section catalog minus whatever keys actually landed on
+      // `d`, purely as a caption explaining WHY nothing renders for them —
+      // this list itself is never shown as a per-section placeholder card.
+      const CATALOG = ['itinerary', 'rooming', 'seating', 'checklists', 'pickup', 'accommodation', 'transport', 'activities', 'documents', 'money', 'managerContact', 'agencyContact'];
+      out.snapAbsentSections = CATALOG.filter((k) => !(k in d));
+    }
   } else if (v === 'share' && d) {
-    out.viewShare = true; out.viewTitle = 'Share links';
+    out.viewShare = true; out.shareMode = 'tokens'; out.viewTitle = 'Share links';
     out.viewSub = d.expiryClamped ? 'the server clamped this expiry forward — a link cannot die before the trip does' : 'opaque, config-scoped, self-filtering';
     // `this.sim.share` is seeded with a FIXTURE token at construction time
     // (sim/seed.ts) regardless of mode. In Simulated mode that fixture is
@@ -635,6 +699,16 @@ export function renderVals(this: any): any {
   const act = this.activeMethod();
   const activeId = act ? act[0] : null;
   const lane = act ? act[2] : null;
+  // `share.snapshot`/`share.manifest` are lane 'D' ("runs on this device")
+  // like every on-ground write, but the credential under them is NOT a
+  // manager session — it's `shareAuth`, opened via `shareClient()`
+  // (`../live/transport.ts`), a third credential kind this playground's
+  // two-lane model was never built to distinguish by lane letter alone (see
+  // `specs/share.ts`'s header and `CLAUDE.md`'s 2026-08-27 note). Reading
+  // `mod`+`activeId` here, rather than adding a third lane value, keeps
+  // `dc/registry.test.ts`'s `lane must be 'B' or 'D'` invariant intact while
+  // still labelling the credential honestly everywhere it's shown.
+  const isShareAuthMethod = mod === 'share' && (activeId === 'snapshot' || activeId === 'manifest');
   // The 'raw' / 'RAW HTTP' tone was removed with `on-ground/` in beta.3 — see
   // `./methods.ts`'s header. A style left here for a badge no method carries is
   // read as a badge some method still carries.
@@ -644,7 +718,9 @@ export function renderVals(this: any): any {
   const laneNote = lane === 'B'
     ? 'this call carries the API key — it can only run on your server'
     : lane === 'D'
-      ? 'this call carries a manager session — safe in the browser'
+      ? (isShareAuthMethod
+          ? 'this call carries a share token, not a manager session — the same credential a traveller’s own browser holds'
+          : 'this call carries a manager session — safe in the browser')
       : 'no call on this screen';
   const credDot: any = { key: '#f5c33b', mgr: '#8b7ce8', both: '#4fb286' };
   const credMark: any = { key: 'K', mgr: 'M', both: 'KM' };
@@ -680,9 +756,11 @@ export function renderVals(this: any): any {
     arrowA: lane === 'B' ? '#6852d6' : '#c9c7c3',
     arrowB: lane === 'D' ? '#6852d6' : '#c9c7c3',
     laneNote,
-    credLabel: act ? (lane === 'B' ? 'apiKeyAuth · runs on your server' : 'managerAuth · runs on this device') : null,
-    credBg: lane === 'B' ? '#fef4e3' : '#efecfb',
-    credFg: lane === 'B' ? '#b45309' : '#6852d6',
+    credLabel: act
+      ? (lane === 'B' ? 'apiKeyAuth · runs on your server' : (isShareAuthMethod ? 'shareAuth · runs on this device (traveller)' : 'managerAuth · runs on this device'))
+      : null,
+    credBg: lane === 'B' ? '#fef4e3' : (isShareAuthMethod ? '#fef0f6' : '#efecfb'),
+    credFg: lane === 'B' ? '#b45309' : (isShareAuthMethod ? '#c0296e' : '#6852d6'),
     ...(() => {
       const on = !!this.state.tourOn && !!act;
       const i = this.state.tourIdx || 0;

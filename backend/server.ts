@@ -691,7 +691,14 @@ const server = createServer((req, res) => {
 
     try {
       if (req.method === 'GET' && pathname === '/health') {
-        sendJson(res, 200, { ok: true, agencyRef: KAAFIL_AGENCY_REF, environment });
+        // `baseUrl` rides along here too, same value `/session` already hands
+        // the browser — not a secret (it is a public host, not a credential),
+        // and the traveller-facing `share` lane needs it to construct its own
+        // `KaafilClient` without first requiring a manager session to be open
+        // (a share token, unlike a manager session, never comes from this
+        // backend's own mint route). See `browser/src/logic/live/transport.ts`'s
+        // `shareClient()`.
+        sendJson(res, 200, { ok: true, agencyRef: KAAFIL_AGENCY_REF, environment, baseUrl: engineBaseUrl });
         return;
       }
 

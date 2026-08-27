@@ -8,8 +8,20 @@
 // `session.ts`'s `session.share`) both push `{token, id, ...}` into
 // `c.sim.share` so this file's own `read`/`revoke` can look the real `id` up
 // by the token the dropdown already offers. See `../live/lane.ts`.
-import { sdkCall } from '../live/transport';
-import { okFromSdk, sectionsForSubject, toFail } from '../live/lane';
+//
+// `snapshot`/`manifest` (this job, GAP `share-fetch-not-shipped` closed
+// Phase 12) are a different credential entirely — `shareAuth`, never
+// `apiKeyAuth` — so they do NOT go through `sdkCall`'s `/sdk` dispatcher the
+// five CRUD methods above use. They go through `shareClient()`
+// (`../live/transport.ts`), a short-lived `KaafilClient` opened with
+// `share.open({ token })`, the traveller's own real path. `lane: 'D'` here
+// means the same thing it always means on this file's own header contract —
+// "runs on this device" — even though the credential under it is not a
+// manager session; `../viewmodel.ts`'s `renderVals` special-cases this
+// module's `snapshot`/`manifest` ids so the credential badge reads
+// `shareAuth`, not `managerAuth`.
+import { sdkCall, shareClient } from '../live/transport';
+import { okFromSdk, sectionsForSubject, toFail, unwrapSdk } from '../live/lane';
 
 export const shareSpecs = (c: any) => ({
   'share.create': {
@@ -166,6 +178,152 @@ export const shareSpecs = (c: any) => ({
         if (!p.keepOld) entry.status = 'REVOKED';
         c.sim.share.unshift({ token: d.token, id: d.id, subject: entry.subject, tripRef: entry.tripRef, status: d.status });
         return { data: { token: d.token, subject: entry.subject, tripRef: entry.tripRef, expiresAt: d.expiresAt, oldStatus: p.keepOld ? 'ACTIVE (kept)' : 'REVOKED' }, meta };
+      } catch (err) {
+        return toFail(err);
+      }
+    }
+  },
+  // ── The traveller-facing fetch surface ──────────────────────────────────
+  // `snapshot`/`manifest` are what a traveller's own browser calls once it
+  // has the `token` from a link — see `../../../../content` in
+  // kaafil-developer-portal's `sdk-reference/share.mdx` for the full
+  // response shape this fixture mirrors field-for-field.
+  'share.snapshot': {
+    lane: 'D', view: 'share',
+    note: 'The traveller-facing fetch: shareAuth only, never apiKeyAuth or managerAuth. Every section passes the same three-test gate (token config ∧ module capability ∧ data present) — a section failing any one of the three is OMITTED from the body entirely, never null, never {}. Check for the KEY, not its value.',
+    p: [{ n: 'token', l: 'token', k: 'sel', d: (r: any) => c.sim.share.map((s: any) => s.token) }],
+    req: (p: any) => ['GET', '/api/v1/share/' + p.token, null],
+    snip: (p: any) => `// client: a KaafilClient (kaafil-js/client) opened with client.share.open({ token })\nconst { data } = await client.share.snapshot({ token });`,
+    // Simulated mode hand-authors a richer snapshot than this playground's
+    // own share.create screen could ever mint: that screen's 'subject'
+    // dropdown maps to exactly ONE real section (sectionsForSubject, in
+    // ../live/lane.ts), because it is a simplified demo control, not the
+    // real MintShareTokenRequest.config.sections bag. A real token can carry
+    // any subset of the 13-section catalog, so this fixture shows a
+    // realistic multi-section mix — several sections present, several
+    // deliberately dark for three different honest reasons (see the
+    // comments below) — rather than only replaying the one section the mint
+    // screen itself could have produced.
+    run: (p: any) => {
+      const entry = c.sim.share.find((x: any) => x.token === p.token);
+      if (!entry) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No share token matches — mint one first.');
+      if (entry.status === 'REVOKED') return c.fail('KaafilShareTokenRevokedError', 'SHARE_TOKEN_REVOKED', 401, 'This share token has been revoked — the traveller-facing surface refuses it before checking expiry.');
+      const t = c.sim.trips[entry.tripRef];
+      if (!t) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No trip resolves for this token.');
+      const today = c.todayIso();
+      const yesterday = new Date(c.simNow() - 86400000).toISOString().slice(0, 10);
+      const voucherExpiresAt = new Date(c.simNow() + 5 * 60000).toISOString();
+      return c.ok({
+        trip: { name: 'Alpine Trek, Sept batch', startDate: t.startDate, endDate: t.endDate, timezone: 'Asia/Kolkata', phase: 'ON_TRIP' },
+        itinerary: {
+          days: [
+            {
+              dayIndex: 0, isoDate: yesterday, cardTitle: 'Day 1', summaryLine: 'Arrival + base camp briefing', isToday: false,
+              items: [
+                { id: 'itm_seed_1', type: 'MEAL', title: 'Breakfast at base camp', description: null, vendorLabel: null, startTime: '08:00', endTime: '09:00', status: 'DONE', timeState: 'done' },
+                { id: 'itm_seed_2', type: 'ACTIVITY', title: 'Acclimatisation briefing', description: null, vendorLabel: 'Local guide — Ravi', startTime: '16:00', endTime: '17:00', status: 'DONE', timeState: 'done' }
+              ]
+            },
+            {
+              // `isToday`/`timeState` below are computed the same way the
+              // real engine computes them for this fixture: against
+              // `c.simNow()` (this playground's own test-clock shift,
+              // `sim.shiftH`), never the device clock outright — the
+              // itinerary board (`ensureItin`) uses the identical `c.todayIso()`.
+              dayIndex: 1, isoDate: today, cardTitle: 'Day 2', summaryLine: 'Summit push', isToday: true,
+              items: [
+                { id: 'itm_seed_3', type: 'MEAL', title: 'Breakfast', description: null, vendorLabel: null, startTime: '06:00', endTime: '07:00', status: 'DONE', timeState: 'done' },
+                { id: 'itm_seed_4', type: 'ACTIVITY', title: 'Summit push', description: 'Bring crampons and a headlamp.', vendorLabel: null, startTime: '08:00', endTime: '14:00', status: 'IN_PROGRESS', timeState: 'now' },
+                { id: 'itm_seed_5', type: 'FREE', title: 'Free evening at base camp', description: null, vendorLabel: null, startTime: null, endTime: null, status: 'PLANNED', timeState: 'upcoming' }
+              ]
+            }
+          ]
+        },
+        rooming: { room: 'Tent 4', bed: 'Left', roommates: ['Kabir', 'Meera'] },
+        // seating deliberately ABSENT — this trip's vehicle has no seat
+        // chart at all (the key is absent for that reason, distinct from
+        // present-and-null, which would mean "mapped but not yet issued").
+        accommodation: {
+          days: [
+            { dayIndex: 0, isoDate: yesterday, items: [
+              { title: 'Base Camp Lodge — 1 night', startAt: yesterday + 'T14:00:00+05:30', endAt: today + 'T11:00:00+05:30', confirmationRef: 'CRM-BOOK-501', providerName: 'Base Camp Lodge', providerPhone: '+919812345678', locationText: 'Base camp, Manali', details: null }
+            ] }
+          ]
+        },
+        transport: {
+          days: [
+            { dayIndex: 0, isoDate: yesterday, items: [
+              { title: 'Delhi → Manali overnight bus', startAt: yesterday + 'T21:00:00+05:30', endAt: today + 'T06:00:00+05:30', confirmationRef: 'PNR-7712', providerName: 'HimAlpine Travels', providerPhone: null, locationText: 'ISBT Kashmere Gate, Delhi', details: { legType: 'BUS', from: 'Delhi', to: 'Manali' } }
+            ] }
+          ]
+        },
+        // activities deliberately ABSENT — the ingested bookings feed has no
+        // ACTIVITY-kind rows for this trip. A real 404-shaped absence, not a
+        // "still loading" state: do not render an "unavailable" placeholder
+        // for this key, render nothing.
+        documents: {
+          vouchers: [
+            { id: 'file_9f2a1c', bookingLabel: 'Base Camp Lodge — 1 night', contentType: 'application/pdf', sizeBytes: 184320, url: 'https://files.kaafil.in/signed/voucher-9f2a1c?exp=' + Date.parse(voucherExpiresAt), expiresAt: voucherExpiresAt }
+          ]
+        },
+        money: { currency: 'INR', totalMinor: 4500000, dueMinor: 1200000, collectedMinor: 3300000 },
+        managerContact: { name: 'Aditi Sharma', phone: '+919900011122' }
+        // checklists, pickup and agencyContact deliberately ABSENT too — one
+        // shape (a missing key) covering three different honest reasons:
+        // this token's config never granted checklists/agencyContact, and
+        // this trip's pickup board has no stops recorded yet.
+      });
+    },
+    live: async (p: any) => {
+      try {
+        const client = await shareClient(p.token);
+        try {
+          const { data, meta } = unwrapSdk(await client.share.snapshot({ token: p.token }));
+          return { data, meta };
+        } finally {
+          client.close();
+        }
+      } catch (err) {
+        return toFail(err);
+      }
+    }
+  },
+  'share.manifest': {
+    lane: 'D', view: 'share',
+    note: 'One row per section that CURRENTLY survives the same three-test gate the snapshot itself applies — a dark section has no row here either, never {present:false}. forms never appears here: this surface has no data source to version it against.',
+    p: [{ n: 'token', l: 'token', k: 'sel', d: (r: any) => c.sim.share.map((s: any) => s.token) }],
+    req: (p: any) => ['GET', '/api/v1/share/' + p.token + '/manifest', null],
+    snip: (p: any) => `const { data } = await client.share.manifest({ token });`,
+    run: (p: any) => {
+      const entry = c.sim.share.find((x: any) => x.token === p.token);
+      if (!entry) return c.fail('KaafilNotFoundError', 'RESOURCE_NOT_FOUND', 404, 'No share token matches — mint one first.');
+      if (entry.status === 'REVOKED') return c.fail('KaafilShareTokenRevokedError', 'SHARE_TOKEN_REVOKED', 401, 'This share token has been revoked.');
+      const version = new Date(c.simNow()).toISOString();
+      // Same present sections as share.snapshot's own fixture above, on
+      // purpose — a manifest and a snapshot fetched moments apart describe
+      // the identical scoped set for the same token.
+      return c.ok({
+        serverTime: version,
+        sections: {
+          itinerary: { present: true, version },
+          rooming: { present: true, version },
+          accommodation: { present: true, version },
+          transport: { present: true, version },
+          documents: { present: true, version },
+          money: { present: true, version },
+          managerContact: { present: true, version }
+        }
+      });
+    },
+    live: async (p: any) => {
+      try {
+        const client = await shareClient(p.token);
+        try {
+          const { data, meta } = unwrapSdk(await client.share.manifest({ token: p.token }));
+          return { data, meta };
+        } finally {
+          client.close();
+        }
       } catch (err) {
         return toFail(err);
       }

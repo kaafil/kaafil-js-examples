@@ -164,8 +164,30 @@ Sorted P0 → P3. "Lands in" cites `implementation-plan/README.md`'s phase table
 
 ## 4. P0 / P1 detail
 
-### P0 — `share-fetch-not-shipped`
-A traveller (or family member) who receives a share link has no API to open it. `mintShareToken` / `readShareToken` / `revokeShareToken` exist (all `apiKeyAuth`, CRM-side management only) but there is no `GET /api/v1/share/{token}` anywhere in `kaafil-js/openapi/openapi.json`, and `kaafil-js/src/client-entry.ts:240-253` states plainly that grepping `generated/security.ts` for `shareAuth` in any operation's accepted schemes "matches only the scheme's own declaration" — zero operations accept it. `KaafilClient.share.open()` mints a valid credential resolver for a scheme nothing checks against; calling either of its two exposed groups (`vendors`, `journey`) throws `UnsatisfiableSchemeError` immediately. There is no raw-HTTP workaround either — the endpoint the traveller side would call simply doesn't exist server-side.
+### ~~P0 — `share-fetch-not-shipped`~~ · CLOSED 2026-08-27
+
+This entry's summary row (§3) was marked CLOSED at Phase 12, when the engine shipped `GET
+/api/v1/share/{token}` and `/manifest` and `shareAuth` started being accepted by real operations —
+but this detail section itself was never struck through, so a reader landing here directly (rather
+than via the summary table) would still read "there is no raw-HTTP workaround either — the endpoint
+the traveller side would call simply doesn't exist server-side," which stopped being true two months
+ago. Per §6's own upkeep obligation ("a register that lists a shipped capability as missing is worse
+than no register"), that omission is fixed now, alongside actually closing the gap this register was
+always for: **this playground never had a screen driving it either**, until this pass. `share`'s five
+`shareTokens.*` CRUD methods (all `apiKeyAuth`, CRM-side token management) had cards; `snapshot`/
+`manifest` (`shareAuth`, the traveller's own credential) did not, despite being live and
+SDK-reachable since `kaafil-js@0.1.0-beta.3`.
+
+**What shipped, and what closes it:** `browser/src/logic/specs/share.ts`'s `share.snapshot`/
+`share.manifest` (Simulated + Connected, both `sdk`), a new `shareClient()` in
+`browser/src/logic/live/transport.ts` (a short-lived `KaafilClient` opened with `share.open({
+token })` — a THIRD credential kind this repo's `sdkCall()`/`managerClient()` split had never
+carried), and `backend/server.ts`'s `/health` route now also answers `baseUrl` (non-secret, already
+sent on `/session`) so a share-lane client can resolve an engine host without first requiring a
+manager session to be open. `browser/src/ui/views/Share.tsx` renders the traveller-facing snapshot —
+`trip.phase`, `isToday`/`timeState`, the newly-sourced `accommodation`/`transport`/`activities`/
+`documents` sections — and demonstrates the single easiest integrator mistake this surface invites:
+an absent section renders as nothing, never a placeholder card.
 
 ### P0 — `forms-writeback-unbuilt`
 The only documented write-back through a share token — pre-trip detail forms, waivers, post-trip feedback/NPS — has no endpoint of any kind (`GET/POST /api/v1/share/:token/forms/...` per `modules/traveller-share/FRD.md:34,102,112` is design-only). `implementation-plan/README.md:254` marks the interim ordering ("build forms immediately after traveller-share, inside Phase 12") but the phase itself is not started. No workaround exists; a CRM must collect these responses entirely outside Kaafil and push results back through the ordinary ingest endpoints by hand.

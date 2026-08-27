@@ -81,6 +81,18 @@ See `GAPS.md`'s `sync-digest-not-on-server-entry` (CLOSED).
 `plan` being at zero is a fact about today, not a target to defend: if a future card has no endpoint,
 badge it `plan` and say so. Do not hand-roll a request to keep this count at zero.
 
+**As of 2026-08-27: 203 methods, still 28 module screens.** Two cards joined the existing `share`
+screen: `share.snapshot`/`share.manifest`, both `sdk`, both `shareAuth` (a THIRD credential kind
+this repo's lane model had never carried before — see `browser/src/logic/live/transport.ts`'s
+`shareClient()` and `specs/share.ts`'s header). Until this pass, `share`'s five methods were all
+`shareTokens.*` CRUD (`apiKeyAuth`, lane B, CRM-side token management) — the traveller-facing fetch
+surface itself (`GET /api/v1/share/{token}` and `/manifest`, shipped Phase 12, `GAPS.md`'s
+`share-fetch-not-shipped` CLOSED) had never been wired into a playground screen at all, despite
+being live and SDK-reachable since `kaafil-js@0.1.0-beta.3`. `lane: 'D'` still means "runs on this
+device" per this file's own definition — it does not mean "carries a manager session" specifically,
+and `viewmodel.ts`'s `renderVals` now reads the active method id, not just its lane, to badge these
+two `shareAuth` rather than `managerAuth`.
+
 **The fourth badge, `raw`, is GONE — and understanding why is the point of this rule.** `raw` meant
 "the endpoint is live, but no SDK client can reach it (`managerAuth`-only writes) — live via
 `on-ground/`, with a manager bearer". It existed because collapsing "no SDK path" into "no path" is a

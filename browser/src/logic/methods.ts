@@ -264,7 +264,15 @@ export const METHODS: Record<string, [string, string, string, string, number?][]
     // The two operations `share-token-lifecycle-partial` was filed against.
     // Both shipped (Phase 12) and both are wired: apiKeyAuth-only, lane B.
     ['patch', 'shareTokens.patch', 'B', 'sdk'],
-    ['regenerate', 'shareTokens.regenerate', 'B', 'sdk']
+    ['regenerate', 'shareTokens.regenerate', 'B', 'sdk'],
+    // The traveller-facing fetch surface (this job) — a DIFFERENT credential
+    // from the five CRUD methods above: shareAuth, never apiKeyAuth. Lane
+    // 'D' per this file's own header ("runs on this device"), even though
+    // the device credential here is a share token, not a manager session —
+    // see specs/share.ts's header and viewmodel.ts's credLabel override for
+    // why the badge still reads correctly as `shareAuth`.
+    ['snapshot', 'share.snapshot', 'D', 'sdk'],
+    ['manifest', 'share.manifest', 'D', 'sdk']
   ],
   entitlement: [
     // readAgencyEntitlement is consoleAuth per openapi.json — no API key will ever satisfy this

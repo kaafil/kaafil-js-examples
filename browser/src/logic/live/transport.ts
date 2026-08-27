@@ -689,3 +689,66 @@ export function adminSdkClient(): KaafilClient {
   _adminSdkClient = client;
   return client;
 }
+
+// ---------------------------------------------------------------------------
+// Share lane — the traveller-facing credential, opened with a bare token
+// ---------------------------------------------------------------------------
+//
+// This is the ONE credential kind on this file that never comes from
+// `backend/server.ts` minting anything. A share token is minted the
+// ordinary `sdkCall`/lane-B way (`shareTokens.create`, apiKeyAuth) and
+// handed back in that response — `../specs/share.ts` already stashes the
+// real `{token, id}` pair it gets back into `c.sim.share`. From THIS
+// file's point of view the token is just a string a caller already holds,
+// the same way a real traveller's browser gets it as a URL fragment on a
+// link it was sent, never from a session-mint round trip of its own.
+//
+// It therefore needs no persisted session, no rotation (a share token does
+// not rotate — `kaafil-js/src/resources/share.ts`'s header — it only
+// expires), and no cached singleton client: each call below opens a fresh,
+// short-lived `KaafilClient` scoped to exactly one token and lets it be
+// garbage-collected, rather than juggling a second module-level client
+// alongside the manager one (`share.open()` on an ALREADY-open client
+// throws `KaafilClientAlreadyOpenError`, so it structurally cannot share
+// `_sdkClient` above with a manager session).
+
+/** Reads the real engine `baseUrl` off `backend/server.ts`'s `GET /health`
+ * — the one non-secret fact `resolveAgencyRef`/`resolveEnvironment` already
+ * read other fields from. A share-lane call needs it despite never talking
+ * to `/session`, because `KaafilClient` still needs to know which engine
+ * host to point at; see `backend/server.ts`'s `/health` handler for why
+ * this is safe to expose (it is a public host, not a credential). */
+async function resolveEngineBaseUrl(): Promise<string> {
+  const url = `${backendUrl()}/health`;
+  let body: unknown;
+  try {
+    const res = await fetch(url);
+    body = await res.json();
+    if (typeof (body as { baseUrl?: unknown })?.baseUrl === 'string') {
+      return (body as { baseUrl: string }).baseUrl;
+    }
+  } catch {
+    // falls through to the thrown error below
+  }
+  throw new TransportError({
+    name: 'TransportError',
+    code: null,
+    status: null,
+    message: `${url} did not answer with {baseUrl} — a share-lane call cannot resolve which engine host to reach without it.`,
+    details: null,
+    retryable: 'no',
+  });
+}
+
+/** Builds a fresh `KaafilClient`, opened with `share.open({ token })`, for
+ * exactly one traveller-facing call. See this section's header for why this
+ * is a plain constructor call rather than a cached module-level client like
+ * `sdkClient()`/`adminSdkClient()` above. Throws a `TransportError` (never a
+ * fabricated success) if `/health` cannot be reached — the same
+ * never-fake invariant this whole file holds everywhere else. */
+export async function shareClient(token: string): Promise<KaafilClient> {
+  const baseUrl = await resolveEngineBaseUrl();
+  const client = new KaafilClient({ environment: 'test', baseUrl });
+  client.share.open({ token });
+  return client;
+}
